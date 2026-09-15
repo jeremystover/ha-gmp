@@ -32,6 +32,16 @@ hour it actually happened.
 | **Account balance** | What GMP says is owed, with past-due flags as attributes |
 | **Last bill** | Amount of the newest bill, with its date and period start |
 | **Latest usage data** | Start of the newest hourly read GMP has published — how far behind the data is |
+| **Billing period start / end** | The GMP billing cycle in progress. GMP publishes a period only once it is billed, so the current one is projected from the last billed period, same length |
+| **Billing period progress** | Percent of the period's days for which GMP has published reads |
+| **Grid import / export / net export this period** | kWh tallied from the statistics since the period began |
+| **Projected grid import / export / net export** | The same, scaled to the whole period by the daily average so far |
+| **Generation this period** | Only on accounts where GMP meters gross generation |
+
+The billing-period sensors are what a dashboard tallying by GMP cycle
+rather than calendar month is built on. An automation that resets
+`utility_meter` helpers when **Billing period start** changes puts local
+meters (an inverter, a sub-panel monitor) on the same cycle.
 
 ## Install
 

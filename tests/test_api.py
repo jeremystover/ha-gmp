@@ -242,3 +242,36 @@ def test_accounts_merge_login_list_with_details():
 @pytest.mark.parametrize("raw", ["2026-09-07T01:00:00Z", "2026-09-07T01:00:00"])
 def test_parse_local_treats_z_as_eastern(raw):
     assert api.parse_local(raw) == datetime(2026, 9, 7, 1, 0, tzinfo=TZ)
+
+
+def test_periods_parse_sorted_and_skip_junk():
+    spans = api.parse_periods(
+        [
+            {"startDate": "2026-08-05T00:00:00Z", "endDate": "2026-09-03T00:00:00Z"},
+            {"startDate": "2026-07-05T00:00:00Z", "endDate": "2026-08-04T00:00:00Z"},
+            {"startDate": "nope"},
+        ]
+    )
+    assert spans == [
+        (date(2026, 7, 5), date(2026, 8, 4)),
+        (date(2026, 8, 5), date(2026, 9, 3)),
+    ]
+    assert api.parse_periods(None) == []
+
+
+def test_current_period_is_the_billed_one_when_today_falls_inside():
+    spans = [(date(2026, 7, 24), date(2026, 8, 23))]
+    assert api.current_period(spans, date(2026, 8, 10)) == (date(2026, 7, 24), date(2026, 8, 23))
+
+
+def test_current_period_is_projected_forward_from_the_last_billed_one():
+    spans = [(date(2026, 6, 24), date(2026, 7, 23)), (date(2026, 7, 24), date(2026, 8, 23))]
+    # One cycle on: same 31-day length, starting the day after the last end.
+    assert api.current_period(spans, date(2026, 9, 14)) == (date(2026, 8, 24), date(2026, 9, 23))
+    # Several cycles on, if the integration was away for a while.
+    assert api.current_period(spans, date(2026, 11, 1)) == (date(2026, 10, 25), date(2026, 11, 24))
+
+
+def test_current_period_falls_back_to_the_calendar_month():
+    assert api.current_period([], date(2026, 2, 10)) == (date(2026, 2, 1), date(2026, 2, 28))
+    assert api.current_period([], date(2026, 12, 31)) == (date(2026, 12, 1), date(2026, 12, 31))

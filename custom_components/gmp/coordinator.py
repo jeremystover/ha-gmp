@@ -24,6 +24,7 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
@@ -46,6 +47,7 @@ from .api import (
     GmpConnectionError,
     GmpError,
     UsageRead,
+    current_period,
     interval_end,
     merge_reads,
 )
@@ -68,6 +70,31 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
+class PeriodSummary:
+    """The billing period in progress, tallied from the stored statistics."""
+
+    start: date
+    end: date
+    days_total: int
+    # Days for which GMP has published reads, counted from ``start``.
+    days_with_data: int
+    import_kwh: float
+    export_kwh: float
+    generation_kwh: float | None
+
+    @property
+    def net_kwh(self) -> float:
+        """Export minus import: positive means the month is banking credit."""
+        return self.export_kwh - self.import_kwh
+
+    def projected(self, value: float) -> float:
+        """Scale a to-date figure to the whole period by the daily average."""
+        if self.days_with_data <= 0:
+            return 0.0
+        return value / self.days_with_data * self.days_total
+
+
+@dataclass
 class GmpData:
     """What the sensors show between statistics runs."""
 
@@ -76,6 +103,7 @@ class GmpData:
     last_read: datetime | None
     last_bill: Bill | None
     has_generation: bool
+    period: PeriodSummary
 
 
 class GmpCoordinator(DataUpdateCoordinator[GmpData]):
@@ -127,9 +155,11 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             # Token lifetime is short next to a 12h interval; always start fresh.
             await self.client.async_login()
             last_read, has_generation = await self._async_insert_usage()
-            last_bill = await self._async_insert_cost()
+            periods = await self.client.async_get_billing_periods(self.account_number)
+            last_bill = await self._async_insert_cost(periods)
             credits = await self.client.async_get_credits(self.account_number)
             status = await self.client.async_get_status(self.account_number)
+            period = await self._async_period_summary(periods, last_read, has_generation)
         except GmpAuthError as err:
             raise ConfigEntryAuthFailed from err
         except GmpConnectionError as err:
@@ -142,6 +172,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             last_read=last_read,
             last_bill=last_bill,
             has_generation=has_generation,
+            period=period,
         )
 
     # --- statistics plumbing ------------------------------------------------
@@ -273,7 +304,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
 
     # --- cost ---------------------------------------------------------------
 
-    async def _async_insert_cost(self) -> Bill | None:
+    async def _async_insert_cost(self, periods: list[tuple[date, date]]) -> Bill | None:
         """Bills as a cost statistic at the start of the period each covers.
 
         GMP does not price individual hours, so this is billing-period
@@ -292,7 +323,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
                 days=BILL_REFETCH_DAYS
             )
         bills = await self.client.async_get_bills(
-            self.account_number, start, today + timedelta(days=1)
+            self.account_number, start, today + timedelta(days=1), periods
         )
         if not bills:
             return None
@@ -315,6 +346,49 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             energy=False,
         )
         return bills[-1]
+
+    # --- billing period in progress -------------------------------------------
+
+    async def _async_period_summary(
+        self,
+        periods: list[tuple[date, date]],
+        last_read: datetime | None,
+        has_generation: bool,
+    ) -> PeriodSummary:
+        """Tally the stored statistics from the start of the current period."""
+        today = dt_util.now(TIMEZONE).date()
+        start, end = current_period(periods, today)
+        ids = {self.statistic_id("energy_consumption"), self.statistic_id("energy_return")}
+        if has_generation:
+            ids.add(self.statistic_id("energy_generation"))
+        stats = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            dt_util.as_utc(datetime.combine(start, datetime.min.time(), tzinfo=TIMEZONE)),
+            None,
+            ids,
+            "day",
+            None,
+            {"change"},
+        )
+
+        def total(kind: str) -> float:
+            rows = stats.get(self.statistic_id(kind), []) if stats else []
+            return sum(float(row.get("change") or 0.0) for row in rows)
+
+        last_day = last_read.astimezone(TIMEZONE).date() if last_read else None
+        days_with_data = 0
+        if last_day is not None and last_day >= start:
+            days_with_data = (min(last_day, end) - start).days + 1
+        return PeriodSummary(
+            start=start,
+            end=end,
+            days_total=(end - start).days + 1,
+            days_with_data=days_with_data,
+            import_kwh=total("energy_consumption"),
+            export_kwh=total("energy_return"),
+            generation_kwh=total("energy_generation") if has_generation else None,
+        )
 
 
 GmpConfigEntry = ConfigEntry[GmpCoordinator]

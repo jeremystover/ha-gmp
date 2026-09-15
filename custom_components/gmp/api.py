@@ -224,12 +224,7 @@ def parse_bills(transactions: Any, periods: Any) -> list[Bill]:
     taken to start the day after the previous bill's usage ended, and the very
     first bill with nothing before it is pinned to its own usage end.
     """
-    spans: list[tuple[date, date]] = []
-    for period in periods or []:
-        try:
-            spans.append((parse_date(period["startDate"]), parse_date(period["endDate"])))
-        except (KeyError, TypeError, ValueError):
-            continue
+    spans = parse_periods(periods)
 
     dated: list[tuple[date, float]] = []
     for txn in transactions or []:
@@ -266,6 +261,40 @@ def parse_bills(transactions: Any, periods: Any) -> list[Bill]:
         Bill(bill_date=bill_date, period_start=start, amount=amount)
         for start, (bill_date, amount) in sorted(by_start.items())
     ]
+
+
+def parse_periods(periods: Any) -> list[tuple[date, date]]:
+    """Billing periods as (start, end) date pairs, oldest first."""
+    spans: list[tuple[date, date]] = []
+    for period in periods or []:
+        try:
+            spans.append((parse_date(period["startDate"]), parse_date(period["endDate"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    spans.sort()
+    return spans
+
+
+def current_period(spans: list[tuple[date, date]], today: date) -> tuple[date, date]:
+    """The billing period containing ``today``.
+
+    GMP only publishes a period once it has been billed, so the period in
+    progress is usually not in the list. It is projected forward from the
+    newest one, same length, until it covers today. With no periods at all,
+    fall back to the calendar month.
+    """
+    for start, end in spans:
+        if start <= today <= end:
+            return start, end
+    if spans:
+        start, end = spans[-1]
+        length = (end - start).days + 1
+        while end < today:
+            start, end = end + timedelta(days=1), end + timedelta(days=length)
+        return start, end
+    start = today.replace(day=1)
+    end = (start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    return start, end
 
 
 def parse_accounts(user: Any, listed: Any) -> list[Account]:
@@ -413,17 +442,25 @@ class GmpClient:
         payload = await self._get(f"/accounts/{account}/status")
         return payload if isinstance(payload, dict) else {}
 
-    async def async_get_bills(self, account: str, start: date, end: date) -> list[Bill]:
+    async def async_get_billing_periods(self, account: str) -> list[tuple[date, date]]:
+        """Billed periods, oldest first. Empty if GMP has none to offer."""
+        try:
+            payload = await self._get(f"/accounts/{account}/billing/periods", allow_404=True)
+        except GmpError as err:
+            _LOGGER.debug("Billing periods unavailable: %s", err)
+            return []
+        return parse_periods(payload.get("periods") if isinstance(payload, dict) else payload)
+
+    async def async_get_bills(
+        self, account: str, start: date, end: date, periods: list[tuple[date, date]]
+    ) -> list[Bill]:
         """Bills issued from ``start`` to ``end``, attributed to their periods."""
         transactions = await self._get(
             f"/accounts/{account}/transactions",
             {"startDate": server_date(start), "endDate": server_date(end)},
             allow_404=True,
         )
-        periods: Any = {}
-        try:
-            periods = await self._get(f"/accounts/{account}/billing/periods")
-        except GmpError as err:
-            _LOGGER.debug("Billing periods unavailable, using bill dates: %s", err)
-        period_list = periods.get("periods") if isinstance(periods, dict) else periods
-        return parse_bills(transactions, period_list)
+        return parse_bills(
+            transactions,
+            [{"startDate": s.isoformat(), "endDate": e.isoformat()} for s, e in periods],
+        )

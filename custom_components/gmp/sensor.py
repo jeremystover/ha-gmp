@@ -7,7 +7,9 @@ it happened.
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -15,15 +17,40 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
+from homeassistant.const import PERCENTAGE, UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import GmpConfigEntry, GmpCoordinator
+from .coordinator import GmpConfigEntry, GmpCoordinator, PeriodSummary
 
 CURRENCY = "USD"
+
+
+@dataclass(frozen=True)
+class PeriodMetric:
+    """One number about the billing period in progress."""
+
+    key: str
+    name: str
+    value: Callable[[PeriodSummary], float | None]
+
+
+PERIOD_METRICS: tuple[PeriodMetric, ...] = (
+    PeriodMetric("period_import", "Grid import this period", lambda p: p.import_kwh),
+    PeriodMetric("period_export", "Grid export this period", lambda p: p.export_kwh),
+    PeriodMetric("period_net", "Net export this period", lambda p: p.net_kwh),
+    PeriodMetric("period_generation", "Generation this period", lambda p: p.generation_kwh),
+    PeriodMetric(
+        "period_import_projected", "Projected grid import", lambda p: p.projected(p.import_kwh)
+    ),
+    PeriodMetric(
+        "period_export_projected", "Projected grid export", lambda p: p.projected(p.export_kwh)
+    ),
+    PeriodMetric("period_net_projected", "Projected net export", lambda p: p.projected(p.net_kwh)),
+)
 
 
 async def async_setup_entry(
@@ -33,14 +60,21 @@ async def async_setup_entry(
 ) -> None:
     """Set up the sensors for one GMP account."""
     coordinator = entry.runtime_data
-    async_add_entities(
-        [
-            GmpCreditBalance(coordinator, entry),
-            GmpAccountBalance(coordinator, entry),
-            GmpLastBill(coordinator, entry),
-            GmpLastRead(coordinator, entry),
-        ]
+    entities: list[GmpEntity] = [
+        GmpCreditBalance(coordinator, entry),
+        GmpAccountBalance(coordinator, entry),
+        GmpLastBill(coordinator, entry),
+        GmpLastRead(coordinator, entry),
+        GmpPeriodStart(coordinator, entry),
+        GmpPeriodEnd(coordinator, entry),
+        GmpPeriodProgress(coordinator, entry),
+    ]
+    entities.extend(
+        GmpPeriodEnergy(coordinator, entry, metric)
+        for metric in PERIOD_METRICS
+        if metric.key != "period_generation" or coordinator.data.has_generation
     )
+    async_add_entities(entities)
 
 
 class GmpEntity(CoordinatorEntity[GmpCoordinator], SensorEntity):
@@ -165,3 +199,96 @@ class GmpLastRead(GmpEntity):
     def native_value(self) -> datetime | None:
         """Start time of the newest read written to statistics."""
         return self.coordinator.data.last_read
+
+
+class GmpPeriodStart(GmpEntity):
+    """First day of the billing period in progress.
+
+    GMP publishes a period only once it is billed, so the current one is
+    projected from the last billed period; ``projected`` says when that is.
+    An automation can reset utility meters when this changes.
+    """
+
+    _attr_name = "Billing period start"
+    _attr_device_class = SensorDeviceClass.DATE
+
+    def __init__(self, coordinator: GmpCoordinator, entry: GmpConfigEntry) -> None:
+        super().__init__(coordinator, entry, "period_start")
+
+    @property
+    def native_value(self) -> date:
+        """Start of the current period."""
+        return self.coordinator.data.period.start
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Length of the period and how much of it GMP has reported."""
+        period = self.coordinator.data.period
+        return {
+            "days_total": period.days_total,
+            "days_with_data": period.days_with_data,
+        }
+
+
+class GmpPeriodEnd(GmpEntity):
+    """Last day of the billing period in progress."""
+
+    _attr_name = "Billing period end"
+    _attr_device_class = SensorDeviceClass.DATE
+
+    def __init__(self, coordinator: GmpCoordinator, entry: GmpConfigEntry) -> None:
+        super().__init__(coordinator, entry, "period_end")
+
+    @property
+    def native_value(self) -> date:
+        """End of the current period."""
+        return self.coordinator.data.period.end
+
+
+class GmpPeriodProgress(GmpEntity):
+    """How far through the billing period GMP's data reaches."""
+
+    _attr_name = "Billing period progress"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:progress-clock"
+
+    def __init__(self, coordinator: GmpCoordinator, entry: GmpConfigEntry) -> None:
+        super().__init__(coordinator, entry, "period_progress")
+
+    @property
+    def native_value(self) -> float:
+        """Percent of the period's days with published reads."""
+        period = self.coordinator.data.period
+        return round(100 * period.days_with_data / period.days_total, 1)
+
+
+class GmpPeriodEnergy(GmpEntity):
+    """A kWh tally for the billing period in progress, or its projection."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_suggested_display_precision = 1
+
+    def __init__(
+        self, coordinator: GmpCoordinator, entry: GmpConfigEntry, metric: PeriodMetric
+    ) -> None:
+        super().__init__(coordinator, entry, metric.key)
+        self._metric = metric
+        self._attr_name = metric.name
+
+    @property
+    def native_value(self) -> float | None:
+        """The tally, from GMP's published reads since the period began."""
+        value = self._metric.value(self.coordinator.data.period)
+        return round(value, 2) if value is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """The period this covers, so the number is never read out of context."""
+        period = self.coordinator.data.period
+        return {
+            "period_start": period.start.isoformat(),
+            "period_end": period.end.isoformat(),
+            "days_with_data": period.days_with_data,
+        }
