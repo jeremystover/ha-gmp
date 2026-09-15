@@ -1,0 +1,16 @@
+{
+  "domain": "gmp",
+  "name": "Green Mountain Power",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://github.com/jeremystover/ha-gmp",
+  "issue_tracker": "https://github.com/jeremystover/ha-gmp/issues",
+  "iot_class": "cloud_polling",
+  "codeowners": [
+    "@jeremystover"
+  ],
+  "dependencies": [
+    "recorder"
+  ],
+  "requirements": []
+}

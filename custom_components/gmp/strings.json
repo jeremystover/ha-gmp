@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Green Mountain Power",
+        "description": "Sign in with the username and password you use at greenmountainpower.com.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "account": {
+        "title": "Choose an account",
+        "description": "This login can see more than one service account, or GMP did not list any. Pick or enter the account number to import.",
+        "data": {
+          "account_number": "Account number"
+        }
+      },
+      "reauth_confirm": {
+        "title": "GMP login expired",
+        "description": "Enter the current password for {username}.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "GMP rejected that username and password.",
+      "cannot_connect": "Could not reach the GMP API."
+    },
+    "abort": {
+      "already_configured": "This GMP account is already configured.",
+      "reauth_successful": "Login updated."
+    }
+  }
+}
