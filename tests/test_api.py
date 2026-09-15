@@ -106,10 +106,44 @@ def test_merge_prefers_hourly_from_its_first_day_onward():
         api.UsageRead(datetime(2026, 9, d, tzinfo=TZ), float(d), 0.0, None) for d in range(1, 8)
     ]
     hourly = [api.UsageRead(datetime(2026, 9, 6, h, tzinfo=TZ), 0.1, 0.0, None) for h in range(24)]
-    merged = api.merge_reads(daily, hourly)
+    merged = api.merge_reads(daily, api.DAILY, hourly)
     assert [r.start.day for r in merged[:5]] == [1, 2, 3, 4, 5]
     assert merged[5:] == hourly
-    assert api.merge_reads(daily, []) == daily
+    assert api.merge_reads(daily, api.DAILY, []) == daily
+
+
+def test_merge_drops_a_month_that_overlaps_the_first_daily_read():
+    monthly = [
+        api.UsageRead(datetime(2026, m, 1, tzinfo=TZ), 100.0, 0.0, None) for m in (6, 7, 8, 9)
+    ]
+    daily = [api.UsageRead(datetime(2026, 8, 20, tzinfo=TZ), 5.0, 0.0, None)]
+    merged = api.merge_reads(monthly, api.MONTHLY, daily)
+    assert [r.start.month for r in merged] == [6, 7, 8]
+    assert merged[-1] is daily[0]
+
+
+def test_interval_end_uses_wall_clock_periods():
+    assert api.interval_end(datetime(2026, 9, 7, 23, tzinfo=TZ), api.HOURLY) == datetime(
+        2026, 9, 8, 0, tzinfo=TZ
+    )
+    # The day DST ends is 25 hours long; it still ends at the next midnight.
+    assert api.interval_end(datetime(2026, 11, 1, tzinfo=TZ), api.DAILY) == datetime(
+        2026, 11, 2, tzinfo=TZ
+    )
+    assert api.interval_end(datetime(2026, 12, 1, tzinfo=TZ), api.MONTHLY) == datetime(
+        2027, 1, 1, tzinfo=TZ
+    )
+    assert api.interval_end(datetime(2026, 2, 1, tzinfo=TZ), api.MONTHLY) == datetime(
+        2026, 3, 1, tzinfo=TZ
+    )
+    with pytest.raises(ValueError):
+        api.interval_end(datetime(2026, 1, 1, tzinfo=TZ), "weekly")
+
+
+def test_monthly_rows_are_labelled_by_start_of_month():
+    payload = {"intervals": [{"values": [{"date": "2025-06-01T00:00:00Z", "consumed": 812.0}]}]}
+    (read,) = api.parse_usage(payload, api.MONTHLY)
+    assert read.start == datetime(2025, 6, 1, tzinfo=TZ)
 
 
 def test_server_date_is_local_midnight_with_offset():

@@ -62,10 +62,11 @@ If you already track production from the inverter (SolisCloud, Enphase, …),
 GMP's number is the utility meter's view of the same thing — useful for
 reconciling a bill, redundant on the dashboard. Pick one.
 
-The first refresh backfills **three years of daily** reads and **sixty days of
-hourly** reads, plus three years of bills, so the dashboard has history from
-the start. Later refreshes fetch hourly data from a few days before the newest
-stored read.
+The first refresh backfills **three years of monthly** reads, **a year of
+daily** reads and **sixty days of hourly** reads, plus three years of bills,
+so the dashboard has history from the start. Monthly reads come from billing,
+so they reach back before a meter that reports intervals was installed. Later
+refreshes fetch hourly data from a few days before the newest stored read.
 
 ## What to expect
 

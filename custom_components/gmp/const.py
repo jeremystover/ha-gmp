@@ -8,9 +8,12 @@ CONF_ACCOUNT_NUMBER = "account_number"
 # dashboard at most half a day further behind than GMP itself.
 UPDATE_INTERVAL_HOURS = 12
 
-# First-run backfill. Daily reads for the long tail, hourly for the recent
-# stretch, matching the shape of Home Assistant's own Opower integration.
-DAILY_BACKFILL_DAYS = 3 * 365
+# First-run backfill: monthly reads for the long tail, daily for the last
+# year, hourly for the recent stretch -- the cascade Home Assistant's own
+# Opower integration uses. Monthly reads come from billing, so they reach
+# back before a meter that reports intervals was installed.
+MONTHLY_BACKFILL_DAYS = 3 * 365
+DAILY_BACKFILL_DAYS = 365
 HOURLY_BACKFILL_DAYS = 60
 BILL_BACKFILL_DAYS = 3 * 365
 
@@ -19,7 +22,9 @@ BILL_BACKFILL_DAYS = 3 * 365
 USAGE_REFETCH_DAYS = 3
 BILL_REFETCH_DAYS = 45
 
-# Request windows. GMP's limits are undocumented; the portal never asks for
-# more than a billing period of hourly data, so stay in that neighbourhood.
+# Request windows, sized to what the portal itself asks for: hourly and
+# daily one billing period at a time, monthly a year at a time. GMP's limits
+# are undocumented and a range it dislikes comes back empty, not as an error.
 HOURLY_CHUNK_DAYS = 31
-DAILY_CHUNK_DAYS = 366
+DAILY_CHUNK_DAYS = 31
+MONTHLY_CHUNK_DAYS = 366

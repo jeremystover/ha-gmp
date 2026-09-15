@@ -38,7 +38,6 @@ TIMEZONE = ZoneInfo("America/New_York")
 HOURLY = "hourly"
 DAILY = "daily"
 MONTHLY = "monthly"
-INTERVAL_SPAN = {HOURLY: timedelta(hours=1), DAILY: timedelta(days=1)}
 
 BILL_TYPE = "Bill Segment"
 # A bill is dated about two days after the usage period it covers ends. The
@@ -125,6 +124,25 @@ def local_midnight(day: date) -> datetime:
     return datetime.combine(day, time(), tzinfo=TIMEZONE)
 
 
+def interval_end(start: datetime, interval: str) -> datetime:
+    """When the interval that began at ``start`` is over.
+
+    Wall-clock arithmetic on purpose: GMP's intervals are local hours, days
+    and calendar months, so the end of a day is the next midnight even when
+    a DST change makes that 23 or 25 hours away.
+    """
+    naive = start.replace(tzinfo=None)
+    if interval == HOURLY:
+        end = naive + timedelta(hours=1)
+    elif interval == DAILY:
+        end = naive + timedelta(days=1)
+    elif interval == MONTHLY:
+        end = (naive.replace(day=1) + timedelta(days=32)).replace(day=1)
+    else:
+        raise ValueError(f"Unknown interval {interval!r}")
+    return end.replace(tzinfo=start.tzinfo)
+
+
 def parse_usage(payload: dict[str, Any], interval: str) -> list[UsageRead]:
     """Turn a usage response into reads sorted by start time."""
     reads: list[UsageRead] = []
@@ -158,16 +176,18 @@ def parse_usage(payload: dict[str, Any], interval: str) -> list[UsageRead]:
     return reads
 
 
-def merge_reads(coarse: list[UsageRead], fine: list[UsageRead]) -> list[UsageRead]:
+def merge_reads(
+    coarse: list[UsageRead], coarse_interval: str, fine: list[UsageRead]
+) -> list[UsageRead]:
     """Prefer finer reads wherever they exist.
 
-    Coarse (daily) reads are kept only for days before the first fine (hourly)
-    read, so the two never overlap in the statistics.
+    A coarse read (a month, a day) is kept only if it ends at or before the
+    first fine read begins, so the two never overlap in the statistics.
     """
     if not fine:
         return list(coarse)
-    cutoff = fine[0].start.replace(hour=0, minute=0, second=0, microsecond=0)
-    return [read for read in coarse if read.start < cutoff] + list(fine)
+    first = fine[0].start
+    return [r for r in coarse if interval_end(r.start, coarse_interval) <= first] + list(fine)
 
 
 def parse_credits(payload: Any) -> list[Credit]:

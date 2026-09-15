@@ -37,7 +37,7 @@ from homeassistant.util.unit_conversion import EnergyConverter
 from .api import (
     DAILY,
     HOURLY,
-    INTERVAL_SPAN,
+    MONTHLY,
     TIMEZONE,
     Bill,
     Credit,
@@ -46,6 +46,7 @@ from .api import (
     GmpConnectionError,
     GmpError,
     UsageRead,
+    interval_end,
     merge_reads,
 )
 from .const import (
@@ -57,6 +58,8 @@ from .const import (
     DOMAIN,
     HOURLY_BACKFILL_DAYS,
     HOURLY_CHUNK_DAYS,
+    MONTHLY_BACKFILL_DAYS,
+    MONTHLY_CHUNK_DAYS,
     UPDATE_INTERVAL_HOURS,
     USAGE_REFETCH_DAYS,
 )
@@ -219,27 +222,32 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         return reads[-1].start, has_generation
 
     async def _async_fetch_reads(self, last_start: float | None) -> list[UsageRead]:
-        """Daily reads for the long tail, hourly for the recent stretch."""
+        """Monthly reads for the long tail, daily for the last year, hourly recently."""
         today = dt_util.now(TIMEZONE).date()
         tomorrow = today + timedelta(days=1)
         hourly_floor = today - timedelta(days=HOURLY_BACKFILL_DAYS)
+        daily_floor = today - timedelta(days=DAILY_BACKFILL_DAYS)
         if last_start is None:
-            daily_from: date | None = today - timedelta(days=DAILY_BACKFILL_DAYS)
-            hourly_from = hourly_floor
+            since = today - timedelta(days=MONTHLY_BACKFILL_DAYS)
         else:
             since = datetime.fromtimestamp(last_start, TIMEZONE).date() - timedelta(
                 days=USAGE_REFETCH_DAYS
             )
-            hourly_from = max(since, hourly_floor)
-            daily_from = since if since < hourly_from else None
+        hourly_from = max(since, hourly_floor)
+        daily_from = max(since, daily_floor)
 
+        monthly: list[UsageRead] = []
+        if since < daily_from:
+            monthly = await self._async_fetch_chunked(
+                MONTHLY, since.replace(day=1), daily_from, MONTHLY_CHUNK_DAYS
+            )
         daily: list[UsageRead] = []
-        if daily_from is not None:
+        if daily_from < hourly_from:
             daily = await self._async_fetch_chunked(
                 DAILY, daily_from, hourly_from, DAILY_CHUNK_DAYS
             )
         hourly = await self._async_fetch_chunked(HOURLY, hourly_from, tomorrow, HOURLY_CHUNK_DAYS)
-        return merge_reads(daily, hourly)
+        return merge_reads(monthly, MONTHLY, merge_reads(daily, DAILY, hourly))
 
     async def _async_fetch_chunked(
         self, interval: str, start: date, end: date, chunk_days: int
@@ -247,19 +255,18 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         """Fetch ``[start, end)`` in windows GMP is known to accept.
 
         The interval still in progress is left out: GMP revises it as the
-        hour or day completes, and a stored row is never rewritten.
+        hour, day or month completes, and a stored row is never rewritten.
         """
         now = dt_util.now(TIMEZONE)
-        span = INTERVAL_SPAN[interval]
         reads: list[UsageRead] = []
         cursor = start
         while cursor < end:
             window_end = min(cursor + timedelta(days=chunk_days), end)
-            _LOGGER.debug("Fetching %s usage %s to %s", interval, cursor, window_end)
             chunk = await self.client.async_get_usage(
                 self.account_number, interval, cursor, window_end
             )
-            reads.extend(r for r in chunk if r.start + span <= now)
+            _LOGGER.debug("%s usage %s to %s: %d reads", interval, cursor, window_end, len(chunk))
+            reads.extend(r for r in chunk if interval_end(r.start, interval) <= now)
             cursor = window_end
         reads.sort(key=lambda r: r.start)
         return reads
