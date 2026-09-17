@@ -31,6 +31,7 @@ from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
@@ -60,6 +61,7 @@ from .const import (
     BILL_BACKFILL_DAYS,
     BILL_REFETCH_DAYS,
     RATES_LOOKBACK_DAYS,
+    REBUILD_RECHECK_SECONDS,
     CONF_ACCOUNT_NUMBER,
     CONF_API_KEY_ID,
     CONF_API_KEY_SECRET,
@@ -142,6 +144,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             name=f"GMP {self.account_number}",
             update_interval=timedelta(hours=UPDATE_INTERVAL_HOURS),
         )
+        self._rebuilt = False
         self.client = GmpClient(
             async_get_clientsession(hass),
             entry.data[CONF_API_KEY_ID],
@@ -175,12 +178,6 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             credits = await self.client.async_get_credits(self.account_number)
             status = await self.client.async_get_status(self.account_number)
             rates = await self._async_rates(last_bill)
-            # The period sensors read back what the writes above queued, and
-            # the recorder runs them on its own thread. Without waiting, a
-            # refresh that rebuilds the series reports the state it replaced --
-            # or nothing at all, on the refresh right after a migration clears
-            # it -- until the next poll a day later.
-            await get_instance(self.hass).async_block_till_done()
             period = await self._async_period_summary(periods, last_read, has_generation)
         except GmpAuthError as err:
             raise ConfigEntryAuthFailed from err
@@ -188,6 +185,14 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             raise UpdateFailed(f"Cannot reach GMP: {err}") from err
         except GmpError as err:
             raise UpdateFailed(str(err)) from err
+        if self._rebuilt:
+            # The rows just queued are not readable yet, so the period above
+            # describes the series they replaced. Waiting here would deadlock:
+            # this runs inside config entry setup, and the recorder does not
+            # drain its queue until Home Assistant has finished starting --
+            # which waits on this setup. So come back for it later instead.
+            self._rebuilt = False
+            async_call_later(self.hass, REBUILD_RECHECK_SECONDS, self._async_recheck)
         return GmpData(
             credits=credits,
             status=status,
@@ -197,6 +202,10 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             period=period,
             rates=rates,
         )
+
+    async def _async_recheck(self, _now: datetime) -> None:
+        """Refresh once the recorder has had time to store a rebuilt series."""
+        await self.async_request_refresh()
 
     async def _async_rates(self, last_bill: Bill | None) -> Rates | None:
         """Prices from the newest bill, re-read only when a new bill lands.
@@ -277,9 +286,9 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             get_instance(self.hass).async_clear_statistics([self.statistic_id("energy_site")])
             base_used, last_used = 0.0, None
 
-        reads = await self._async_fetch_reads(
-            backfill_start(last_consumption, last_return, last_generation, last_used)
-        )
+        cursor = backfill_start(last_consumption, last_return, last_generation, last_used)
+        self._rebuilt = cursor is None
+        reads = await self._async_fetch_reads(cursor)
         if not reads:
             _LOGGER.debug("No usage reads returned")
             last = dt_util.utc_from_timestamp(last_consumption) if last_consumption else None
