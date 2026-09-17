@@ -167,10 +167,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             last_bill = await self._async_insert_cost(periods)
             credits = await self.client.async_get_credits(self.account_number)
             status = await self.client.async_get_status(self.account_number)
-            today = dt_util.now(TIMEZONE).date()
-            rates = await self.client.async_get_rates(
-                self.account_number, today - timedelta(days=RATES_LOOKBACK_DAYS), today
-            )
+            rates = await self._async_rates(last_bill)
             period = await self._async_period_summary(periods, last_read, has_generation)
         except GmpAuthError as err:
             raise ConfigEntryAuthFailed from err
@@ -186,6 +183,26 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             has_generation=has_generation,
             period=period,
             rates=rates,
+        )
+
+    async def _async_rates(self, last_bill: Bill | None) -> Rates | None:
+        """Prices from the newest bill, re-read only when a new bill lands.
+
+        A rate changes when GMP issues a bill and not otherwise, so polling for
+        one twice a day would spend a request an hour to watch a number that
+        moves monthly at most. The bill date we already have says when to look.
+        """
+        known = self.data.rates if self.data else None
+        if last_bill is None:
+            return known
+        if known is not None and known.bill_date >= last_bill.bill_date:
+            return known
+        today = dt_util.now(TIMEZONE).date()
+        return (
+            await self.client.async_get_rates(
+                self.account_number, today - timedelta(days=RATES_LOOKBACK_DAYS), today
+            )
+            or known
         )
 
     # --- statistics plumbing ------------------------------------------------
