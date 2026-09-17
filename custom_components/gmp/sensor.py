@@ -43,6 +43,7 @@ PERIOD_METRICS: tuple[PeriodMetric, ...] = (
     PeriodMetric("period_export", "Grid export this period", lambda p: p.export_kwh),
     PeriodMetric("period_net", "Net export this period", lambda p: p.net_kwh),
     PeriodMetric("period_generation", "Generation this period", lambda p: p.generation_kwh),
+    PeriodMetric("period_site", "Site consumption this period", lambda p: p.used_kwh),
     PeriodMetric(
         "period_import_projected", "Projected grid import", lambda p: p.projected(p.import_kwh)
     ),
@@ -50,7 +51,15 @@ PERIOD_METRICS: tuple[PeriodMetric, ...] = (
         "period_export_projected", "Projected grid export", lambda p: p.projected(p.export_kwh)
     ),
     PeriodMetric("period_net_projected", "Projected net export", lambda p: p.projected(p.net_kwh)),
+    PeriodMetric(
+        "period_site_projected",
+        "Projected site consumption",
+        lambda p: p.projected(p.used_kwh) if p.used_kwh is not None else None,
+    ),
 )
+
+# Fields GMP only fills in for an account with a generation meter.
+GENERATION_ONLY = frozenset({"period_generation", "period_site", "period_site_projected"})
 
 
 async def async_setup_entry(
@@ -72,7 +81,7 @@ async def async_setup_entry(
     entities.extend(
         GmpPeriodEnergy(coordinator, entry, metric)
         for metric in PERIOD_METRICS
-        if metric.key != "period_generation" or coordinator.data.has_generation
+        if metric.key not in GENERATION_ONLY or coordinator.data.has_generation
     )
     async_add_entities(entities)
 

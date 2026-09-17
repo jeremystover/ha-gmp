@@ -21,6 +21,7 @@ hour it actually happened.
 | `gmp:<account>_energy_consumption` | kWh | Energy taken from the grid |
 | `gmp:<account>_energy_return` | kWh | Energy sent back to the grid |
 | `gmp:<account>_energy_generation` | kWh | Gross solar production, only if GMP meters it on your account |
+| `gmp:<account>_energy_site` | kWh | Everything the property used, grid and solar together (GMP's `totalEnergyUsed`); only where generation is metered |
 | `gmp:<account>_energy_cost` | USD | Billed amount, at the start of each billing period |
 | `gmp:<account>_energy_compensation` | USD | A bill that came out negative (credits exceeded charges) |
 
@@ -37,6 +38,7 @@ hour it actually happened.
 | **Grid import / export / net export this period** | kWh tallied from the statistics since the period began |
 | **Projected grid import / export / net export** | The same, scaled to the whole period by the daily average so far |
 | **Generation this period** | Only on accounts where GMP meters gross generation |
+| **Site consumption this period / projected** | Total use, grid plus self-consumed solar. Only where generation is metered |
 
 The billing-period sensors are what a dashboard tallying by GMP cycle
 rather than calendar month is built on. An automation that resets
@@ -50,13 +52,15 @@ meters (an inverter, a sub-panel monitor) on the same cycle.
 restart → Settings → Devices & services → Add integration → Green Mountain
 Power.
 
-Sign in with your greenmountainpower.com username and password. If the login
+Enter the **API key id and secret** GMP issued for your account. GMP hands
+these out on request — write to their software engineering team. If the key
 can see more than one service account you pick one; if GMP lists none, you
 type the account number from your bill.
 
-> The password is stored in Home Assistant's config entry, like any other
-> cloud integration. If GMP rejects it later, Home Assistant asks for a new
-> one rather than silently stopping.
+> The key is stored in Home Assistant's config entry, like any other cloud
+> credential. If GMP rejects it later, Home Assistant asks for a new one
+> rather than silently stopping. Upgrading from a version that signed in with
+> a username and password drops those and asks for a key.
 
 ### Energy dashboard
 
@@ -90,20 +94,26 @@ refreshes fetch hourly data from a few days before the newest stored read.
   dashboard's static-price option on the consumption statistic instead.
 - **A stored read is never rewritten.** Reads are written once each interval
   has ended. If GMP later revises a read, the original stays.
+- **Half-posted hours are held back.** GMP's export channel posts later than
+  its generation channel, so the newest hours can show generation against a
+  returned of zero, which would overstate site consumption. Those trailing
+  hours are skipped and picked up on a later run, once GMP has finished
+  with them.
 - **Timestamps.** GMP labels every timestamp `Z` but the values are Eastern
   wall-clock time, and hourly rows are labelled by the *end* of the hour. Both
   are corrected, matching what the GMP portal itself does.
 
 ## How it was worked out
 
-The `greenmountainpower` package on PyPI proved the login flow (a password
-grant against `/api/v2/applications/token` with the portal's public client id)
-but reads only `consumed` and has been unmaintained since 2023. Everything
-else came from the portal's unminified Vue bundle:
+Requests are signed with an API key over HTTP Basic, which is how GMP intends
+customers to reach the API. The endpoints themselves came from the portal's
+unminified Vue bundle; the `greenmountainpower` package on PyPI, unmaintained
+since 2023, reads only `consumed` and logs in with the portal's own password
+grant, which this integration no longer uses:
 
 | Endpoint | Used for |
 | --- | --- |
-| `GET /api/v2/usage/{account}/{hourly,daily,monthly}?startDate&endDate&temp=f` | `consumed`, `returnedGeneration`, `generation` per interval |
+| `GET /api/v2/usage/{account}/{hourly,daily,monthly}?startDate&endDate&temp=f` | `consumed`, `returnedGeneration`, `generation`, `totalEnergyUsed` per interval |
 | `GET /api/v2/accounts/{account}/generation/credits` | `expiringCredits[]` with `creditDate`, `expirationDate`, `amount` |
 | `GET /api/v2/accounts/{account}/transactions?startDate&endDate` | Bills (`type == "Bill Segment"`, `payoffAmount`) |
 | `GET /api/v2/accounts/{account}/billing/periods` | Billing period spans |

@@ -27,7 +27,7 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
+from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -50,11 +50,14 @@ from .api import (
     current_period,
     interval_end,
     merge_reads,
+    trim_provisional,
 )
 from .const import (
     BILL_BACKFILL_DAYS,
     BILL_REFETCH_DAYS,
     CONF_ACCOUNT_NUMBER,
+    CONF_API_KEY_ID,
+    CONF_API_KEY_SECRET,
     DAILY_BACKFILL_DAYS,
     DAILY_CHUNK_DAYS,
     DOMAIN,
@@ -81,6 +84,9 @@ class PeriodSummary:
     import_kwh: float
     export_kwh: float
     generation_kwh: float | None
+    # Everything the property consumed, grid and solar together. GMP reports
+    # it per interval; None on accounts with no generation meter.
+    used_kwh: float | None
 
     @property
     def net_kwh(self) -> float:
@@ -122,8 +128,8 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         )
         self.client = GmpClient(
             async_get_clientsession(hass),
-            entry.data[CONF_USERNAME],
-            entry.data[CONF_PASSWORD],
+            entry.data[CONF_API_KEY_ID],
+            entry.data[CONF_API_KEY_SECRET],
         )
 
     # --- statistic ids ------------------------------------------------------
@@ -152,8 +158,6 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
 
     async def _async_update_data(self) -> GmpData:
         try:
-            # Token lifetime is short next to a 12h interval; always start fresh.
-            await self.client.async_login()
             last_read, has_generation = await self._async_insert_usage()
             periods = await self.client.async_get_billing_periods(self.account_number)
             last_bill = await self._async_insert_cost(periods)
@@ -218,6 +222,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         base_consumption, last_start = await self._async_last("energy_consumption")
         base_return, _ = await self._async_last("energy_return")
         base_generation, _ = await self._async_last("energy_generation")
+        base_used, _ = await self._async_last("energy_site")
 
         reads = await self._async_fetch_reads(last_start)
         if not reads:
@@ -237,7 +242,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             self._rows([(r.start, r.returned) for r in reads], base_return, last_start),
             energy=True,
         )
-        # Only accounts with a generation meter get this field at all.
+        # Only accounts with a generation meter get these fields at all.
         has_generation = any(r.generation is not None for r in reads) or base_generation > 0
         if has_generation:
             self._add(
@@ -246,6 +251,18 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
                 self._rows(
                     [(r.start, r.generation or 0.0) for r in reads],
                     base_generation,
+                    last_start,
+                ),
+                energy=True,
+            )
+            # GMP's own total for what the property used: grid import plus the
+            # share of production the house consumed instead of exporting.
+            self._add(
+                "energy_site",
+                "site consumption",
+                self._rows(
+                    [(r.start, r.used if r.used is not None else r.consumed) for r in reads],
+                    base_used,
                     last_start,
                 ),
                 energy=True,
@@ -278,7 +295,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
                 DAILY, daily_from, hourly_from, DAILY_CHUNK_DAYS
             )
         hourly = await self._async_fetch_chunked(HOURLY, hourly_from, tomorrow, HOURLY_CHUNK_DAYS)
-        return merge_reads(monthly, MONTHLY, merge_reads(daily, DAILY, hourly))
+        return trim_provisional(merge_reads(monthly, MONTHLY, merge_reads(daily, DAILY, hourly)))
 
     async def _async_fetch_chunked(
         self, interval: str, start: date, end: date, chunk_days: int
@@ -361,6 +378,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         ids = {self.statistic_id("energy_consumption"), self.statistic_id("energy_return")}
         if has_generation:
             ids.add(self.statistic_id("energy_generation"))
+            ids.add(self.statistic_id("energy_site"))
         stats = await get_instance(self.hass).async_add_executor_job(
             statistics_during_period,
             self.hass,
@@ -388,6 +406,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             import_kwh=total("energy_consumption"),
             export_kwh=total("energy_return"),
             generation_kwh=total("energy_generation") if has_generation else None,
+            used_kwh=total("energy_site") if has_generation else None,
         )
 
 

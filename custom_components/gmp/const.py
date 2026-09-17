@@ -3,6 +3,10 @@
 DOMAIN = "gmp"
 
 CONF_ACCOUNT_NUMBER = "account_number"
+# GMP issues an API key id and secret on request; they go over the wire as
+# HTTP Basic credentials. Ask software engineering at Green Mountain Power.
+CONF_API_KEY_ID = "api_key_id"
+CONF_API_KEY_SECRET = "api_key_secret"
 
 # GMP posts meter data with a delay of hours to a day. Twice a day keeps the
 # dashboard at most half a day further behind than GMP itself.

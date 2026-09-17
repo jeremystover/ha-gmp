@@ -275,3 +275,60 @@ def test_current_period_is_projected_forward_from_the_last_billed_one():
 def test_current_period_falls_back_to_the_calendar_month():
     assert api.current_period([], date(2026, 2, 10)) == (date(2026, 2, 1), date(2026, 2, 28))
     assert api.current_period([], date(2026, 12, 31)) == (date(2026, 12, 1), date(2026, 12, 31))
+
+
+def test_total_energy_used_is_read_as_on_site_use():
+    payload = {
+        "intervals": [
+            {
+                "values": [
+                    {
+                        "date": "2026-09-12T15:00:00Z",
+                        "consumed": 0.42,
+                        "generation": 3.15,
+                        "returnedGeneration": 1.87,
+                        "totalEnergyUsed": 1.70,
+                    }
+                ]
+            }
+        ]
+    }
+    (read,) = api.parse_usage(payload, api.HOURLY)
+    assert read.used == 1.70
+    # GMP's own identity, which its figure satisfies to the cent.
+    assert round(read.consumed + read.generation - read.returned, 2) == read.used
+
+
+def test_a_row_without_total_energy_used_has_none():
+    payload = {"intervals": [{"values": [{"date": "2026-08-25T00:00:00Z", "consumed": 12.0}]}]}
+    (read,) = api.parse_usage(payload, api.DAILY)
+    assert read.used is None
+
+
+def test_trailing_generation_without_export_is_held_back():
+    posted = [
+        api.UsageRead(datetime(2026, 9, 16, h, tzinfo=TZ), 0.1, 0.5, 2.0, 1.6)
+        for h in range(9, 11)
+    ]
+    provisional = [
+        api.UsageRead(datetime(2026, 9, 16, h, tzinfo=TZ), 0.1, 0.0, 5.0, 5.1)
+        for h in range(11, 14)
+    ]
+    reads = posted + provisional
+    kept = api.trim_provisional(reads)
+    assert [r.start.hour for r in kept] == [9, 10]
+
+
+def test_a_fully_self_consumed_hour_mid_series_is_kept():
+    reads = [
+        api.UsageRead(datetime(2026, 9, 16, 9, tzinfo=TZ), 0.1, 0.5, 2.0, 1.6),
+        # Everything the array made went into the house: real, not provisional.
+        api.UsageRead(datetime(2026, 9, 16, 10, tzinfo=TZ), 0.1, 0.0, 2.0, 2.1),
+        api.UsageRead(datetime(2026, 9, 16, 11, tzinfo=TZ), 0.1, 0.9, 3.0, 2.2),
+    ]
+    assert api.trim_provisional(reads) == reads
+
+
+def test_trim_leaves_a_series_with_no_generation_alone():
+    reads = [api.UsageRead(datetime(2026, 8, d, tzinfo=TZ), 12.0, 0.0, None) for d in range(1, 5)]
+    assert api.trim_provisional(reads) == reads

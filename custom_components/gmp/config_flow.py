@@ -6,39 +6,37 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import Account, GmpAuthError, GmpClient, GmpError
-from .const import CONF_ACCOUNT_NUMBER, DOMAIN
+from .const import CONF_ACCOUNT_NUMBER, CONF_API_KEY_ID, CONF_API_KEY_SECRET, DOMAIN
 
 USER_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_USERNAME): str,
-        vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_API_KEY_ID): str,
+        vol.Required(CONF_API_KEY_SECRET): str,
     }
 )
 
 
 class GmpConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Sign in, then pick the service account to import."""
+    """Take the API key, then pick the service account to import."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
-        self._username: str = ""
-        self._password: str = ""
+        self._key_id: str = ""
+        self._key_secret: str = ""
         self._accounts: list[Account] = []
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Collect credentials and discover the accounts behind them."""
+        """Collect the API key and discover the accounts behind it."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            self._username = user_input[CONF_USERNAME].strip()
-            self._password = user_input[CONF_PASSWORD]
-            client = GmpClient(async_get_clientsession(self.hass), self._username, self._password)
+            self._key_id = user_input[CONF_API_KEY_ID].strip()
+            self._key_secret = user_input[CONF_API_KEY_SECRET].strip()
+            client = GmpClient(async_get_clientsession(self.hass), self._key_id, self._key_secret)
             try:
-                await client.async_login()
                 self._accounts = await client.async_get_accounts()
             except GmpAuthError:
                 errors["base"] = "invalid_auth"
@@ -79,41 +77,43 @@ class GmpConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title=f"GMP {title}",
             data={
-                CONF_USERNAME: self._username,
-                CONF_PASSWORD: self._password,
+                CONF_API_KEY_ID: self._key_id,
+                CONF_API_KEY_SECRET: self._key_secret,
                 CONF_ACCOUNT_NUMBER: number,
             },
         )
 
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
-        """GMP rejected the stored password."""
+        """GMP rejected the stored key, or an older entry has none."""
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Take a new password for the existing entry."""
+        """Take a new API key for the existing entry."""
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
         if user_input is not None:
-            client = GmpClient(
-                async_get_clientsession(self.hass),
-                entry.data[CONF_USERNAME],
-                user_input[CONF_PASSWORD],
-            )
+            key_id = user_input[CONF_API_KEY_ID].strip()
+            key_secret = user_input[CONF_API_KEY_SECRET].strip()
+            client = GmpClient(async_get_clientsession(self.hass), key_id, key_secret)
             try:
-                await client.async_login()
+                await client.async_get_accounts()
             except GmpAuthError:
                 errors["base"] = "invalid_auth"
             except GmpError:
                 errors["base"] = "cannot_connect"
             else:
                 return self.async_update_reload_and_abort(
-                    entry, data_updates={CONF_PASSWORD: user_input[CONF_PASSWORD]}
+                    entry,
+                    data_updates={
+                        CONF_API_KEY_ID: key_id,
+                        CONF_API_KEY_SECRET: key_secret,
+                    },
                 )
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),
+            data_schema=USER_SCHEMA,
             errors=errors,
-            description_placeholders={"username": entry.data[CONF_USERNAME]},
+            description_placeholders={"account": entry.data[CONF_ACCOUNT_NUMBER]},
         )

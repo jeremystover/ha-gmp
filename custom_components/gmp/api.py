@@ -1,9 +1,9 @@
-"""Async client for Green Mountain Power's undocumented customer API.
+"""Async client for Green Mountain Power's customer API.
 
-Everything here was read off GMP's own web portal -- the Vue bundle behind
-greenmountainpower.com/account -- which calls these same endpoints with the same
-public client id. Nothing in this module imports Home Assistant, so the parsing
-is testable with plain pytest.
+The endpoints were read off GMP's own web portal -- the Vue bundle behind
+greenmountainpower.com/account -- but requests are signed with an API key GMP
+issues on request, not with the portal's password grant. Nothing in this module
+imports Home Assistant, so the parsing is testable with plain pytest.
 
 Two things the API does that are not obvious from its responses:
 
@@ -27,10 +27,7 @@ import aiohttp
 _LOGGER = logging.getLogger(__name__)
 
 BASE_URL = "https://api.greenmountainpower.com/api/v2"
-TOKEN_URL = f"{BASE_URL}/applications/token?remember_me=false"
-# The portal's public OAuth client id, shipped in its JavaScript bundle.
-CLIENT_ID = "C95D19408B024BD4BEB42FA66F08BCEA"
-HEADERS = {"GMP-Source": "web"}
+HEADERS = {"GMP-Source": "web", "Accept": "application/json"}
 
 # GMP serves Vermont only.
 TIMEZONE = ZoneInfo("America/New_York")
@@ -81,6 +78,9 @@ class UsageRead:
     consumed: float
     returned: float
     generation: float | None
+    # On-site use: consumed + generation - returned, as GMP computes it.
+    # Absent on accounts with no generation meter.
+    used: float | None = None
 
 
 @dataclass(frozen=True)
@@ -164,12 +164,14 @@ def parse_usage(payload: dict[str, Any], interval: str) -> list[UsageRead]:
             if consumed is None:
                 consumed = value.get("consumedTotal")
             generation = value.get("generation")
+            used = value.get("totalEnergyUsed")
             reads.append(
                 UsageRead(
                     start=start,
                     consumed=float(consumed or 0.0),
                     returned=float(value.get("returnedGeneration") or 0.0),
                     generation=float(generation) if generation is not None else None,
+                    used=float(used) if used is not None else None,
                 )
             )
     reads.sort(key=lambda read: read.start)
@@ -188,6 +190,30 @@ def merge_reads(
         return list(coarse)
     first = fine[0].start
     return [r for r in coarse if interval_end(r.start, coarse_interval) <= first] + list(fine)
+
+
+def trim_provisional(reads: list[UsageRead]) -> list[UsageRead]:
+    """Drop trailing reads GMP has only half posted.
+
+    The export channel posts later than the generation channel, so the newest
+    intervals can show generation against a returned of zero -- which makes
+    ``totalEnergyUsed`` far too high for those hours. Dropping them off the end
+    costs nothing: a stored row is never rewritten, but a row never stored is
+    picked up by the next run's refetch window once GMP has finished with it.
+
+    Only the trailing run is dropped. The same shape earlier in the series is a
+    real hour in which the house used everything the array made.
+    """
+    cut = len(reads)
+    while cut > 0:
+        read = reads[cut - 1]
+        if (read.generation or 0.0) > 0.0 and read.returned == 0.0:
+            cut -= 1
+            continue
+        break
+    if cut != len(reads):
+        _LOGGER.debug("Holding back %d partly posted reads", len(reads) - cut)
+    return reads[:cut]
 
 
 def parse_credits(payload: Any) -> list[Credit]:
@@ -341,36 +367,9 @@ async def _message(resp: aiohttp.ClientResponse) -> str:
 class GmpClient:
     """Thin async wrapper over the handful of endpoints this integration uses."""
 
-    def __init__(self, session: aiohttp.ClientSession, username: str, password: str) -> None:
+    def __init__(self, session: aiohttp.ClientSession, key_id: str, key_secret: str) -> None:
         self._session = session
-        self._username = username
-        self._password = password
-        self._token: str | None = None
-
-    async def async_login(self) -> None:
-        """Exchange the credentials for a bearer token.
-
-        The same password grant the portal's login form uses.
-        """
-        data = {
-            "grant_type": "password",
-            "username": self._username,
-            "password": self._password,
-            "client_id": CLIENT_ID,
-        }
-        try:
-            async with self._session.post(TOKEN_URL, data=data, headers=HEADERS) as resp:
-                if resp.status in (400, 401, 403):
-                    raise GmpAuthError(await _message(resp))
-                if resp.status >= 400:
-                    raise GmpConnectionError(f"Login failed: HTTP {resp.status}")
-                body = await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            raise GmpConnectionError(str(err)) from err
-        token = body.get("access_token") if isinstance(body, dict) else None
-        if not token:
-            raise GmpAuthError("No access token in login response")
-        self._token = token
+        self._auth = aiohttp.BasicAuth(key_id, key_secret)
 
     async def _get(
         self,
@@ -378,20 +377,12 @@ class GmpClient:
         params: dict[str, str] | None = None,
         *,
         allow_404: bool = False,
-        _retry: bool = True,
     ) -> Any:
-        if self._token is None:
-            await self.async_login()
-        headers = {**HEADERS, "Authorization": f"Bearer {self._token}"}
         try:
             async with self._session.get(
-                f"{BASE_URL}{path}", params=params, headers=headers
+                f"{BASE_URL}{path}", params=params, headers=HEADERS, auth=self._auth
             ) as resp:
-                if resp.status == 401:
-                    if _retry:
-                        # Tokens expire; one fresh login is cheap.
-                        self._token = None
-                        return await self._get(path, params, allow_404=allow_404, _retry=False)
+                if resp.status in (401, 403):
                     raise GmpAuthError(await _message(resp))
                 if resp.status == 404 and allow_404:
                     # GMP answers 404 rather than [] when there are no records.
