@@ -598,6 +598,26 @@ def parse_rates(rows: Any) -> Rates | None:
     )
 
 
+def history_truncated(
+    partial_sum: float,
+    partial_last: float | None,
+    reference_sum: float,
+    reference_last: float | None,
+) -> bool:
+    """Whether a series that should dominate another has lost its history.
+
+    Site consumption is grid import plus whatever generation the house used
+    instead of exporting, and a meter cannot return more than it made, so the
+    site total can never fall below the consumption total over the same span.
+    A series level with its reference in time but behind it in total is
+    therefore missing rows, not merely lagging -- the one case that cannot be
+    fixed by appending, because appending only ever adds newer rows.
+    """
+    if partial_last is None or reference_last is None:
+        return False
+    return partial_last >= reference_last and partial_sum < reference_sum
+
+
 def backfill_start(
     consumption: float | None,
     returned: float | None,

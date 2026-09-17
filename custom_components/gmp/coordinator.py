@@ -50,6 +50,7 @@ from .api import (
     UsageRead,
     backfill_start,
     current_period,
+    history_truncated,
     interval_end,
     merge_reads,
     trim_provisional,
@@ -249,6 +250,20 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         base_return, last_return = await self._async_last("energy_return")
         base_generation, last_generation = await self._async_last("energy_generation")
         base_used, last_used = await self._async_last("energy_site")
+
+        # A version of this integration that shared one cursor across series
+        # started site consumption at whatever the others had already reached,
+        # leaving it permanently short of its own history. Clearing it is the
+        # only way back: the rebuild below then refills it from the start.
+        if history_truncated(base_used, last_used, base_consumption, last_consumption):
+            _LOGGER.warning(
+                "Rebuilding %s: %.0f kWh stored against %.0f kWh of consumption",
+                self.statistic_id("energy_site"),
+                base_used,
+                base_consumption,
+            )
+            get_instance(self.hass).async_clear_statistics([self.statistic_id("energy_site")])
+            base_used, last_used = 0.0, None
 
         reads = await self._async_fetch_reads(
             backfill_start(last_consumption, last_return, last_generation, last_used)

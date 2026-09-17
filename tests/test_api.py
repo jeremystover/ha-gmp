@@ -435,3 +435,30 @@ class TestParseRates:
 
     def test_row_without_usage_is_not_rateable(self):
         assert api.parse_rates([{"Bill Date": "2026-08-25", "Bill Amount": 20.0}]) is None
+
+
+class TestHistoryTruncated:
+    """Detecting a series that lost history, which appending cannot fix."""
+
+    def test_level_in_time_but_behind_in_total(self):
+        # The regression: site consumption caught up to the newest read but
+        # carries two days of sum against three years of consumption.
+        assert api.history_truncated(72.06, 1000.0, 41000.0, 1000.0) is True
+
+    def test_healthy_series_dominates_its_reference(self):
+        # Site consumption is import plus self-used generation, so it leads.
+        assert api.history_truncated(41065.0, 1000.0, 41000.0, 1000.0) is False
+
+    def test_equal_totals_are_fine(self):
+        # Every row fell back to consumption: an account with no generation yet.
+        assert api.history_truncated(41000.0, 1000.0, 41000.0, 1000.0) is False
+
+    def test_merely_lagging_is_not_truncated(self):
+        # A series an hour behind is behind in total for a good reason, and
+        # the next append fixes it. Clearing here would rebuild for nothing.
+        assert api.history_truncated(40990.0, 996.0, 41000.0, 1000.0) is False
+
+    def test_absent_series_is_not_truncated(self):
+        # No generation meter: site and generation never fill at all.
+        assert api.history_truncated(0.0, None, 41000.0, 1000.0) is False
+        assert api.history_truncated(0.0, 1000.0, 0.0, None) is False
