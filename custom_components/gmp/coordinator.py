@@ -51,6 +51,7 @@ from .api import (
     backfill_start,
     current_period,
     history_truncated,
+    site_use,
     interval_end,
     merge_reads,
     trim_provisional,
@@ -117,6 +118,16 @@ class GmpData:
     rates: Rates | None
 
 
+def statistic_id(account: str, kind: str) -> str:
+    """``gmp:<account>_<kind>`` -- what to pick in the Energy dashboard.
+
+    The recorder allows only lowercase letters, digits and underscores in a
+    statistic id. GMP account numbers are digits, but don't assume.
+    """
+    slug = re.sub(r"[^a-z0-9_]", "_", account.lower())
+    return f"{DOMAIN}:{slug}_{kind}"
+
+
 class GmpCoordinator(DataUpdateCoordinator[GmpData]):
     """Twice a day: log in, extend the statistics, refresh the sensors."""
 
@@ -140,13 +151,8 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
     # --- statistic ids ------------------------------------------------------
 
     def statistic_id(self, kind: str) -> str:
-        """``gmp:<account>_<kind>`` -- what to pick in the Energy dashboard.
-
-        The recorder allows only lowercase letters, digits and underscores in
-        a statistic id. GMP account numbers are digits, but don't assume.
-        """
-        account = re.sub(r"[^a-z0-9_]", "_", self.account_number.lower())
-        return f"{DOMAIN}:{account}_{kind}"
+        """``gmp:<account>_<kind>`` -- what to pick in the Energy dashboard."""
+        return statistic_id(self.account_number, kind)
 
     def _metadata(self, kind: str, label: str, *, energy: bool) -> StatisticMetaData:
         return StatisticMetaData(
@@ -304,7 +310,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
                 "energy_site",
                 "site consumption",
                 self._rows(
-                    [(r.start, r.used if r.used is not None else r.consumed) for r in reads],
+                    [(r.start, site_use(r)) for r in reads],
                     base_used,
                     last_used,
                 ),

@@ -598,6 +598,24 @@ def parse_rates(rows: Any) -> Rates | None:
     )
 
 
+def site_use(read: UsageRead) -> float:
+    """What the property used in one interval, or the best figure GMP supports.
+
+    ``totalEnergyUsed`` is exactly ``consumed + generation - returnedGeneration``,
+    and GMP computes it with a missing generation figure counted as zero. So in
+    an interval where the export channel has posted and the generation channel
+    has not, the field collapses to net grid flow and goes negative under the
+    array -- minus seven kilowatt-hours of consumption, which no house does.
+
+    Falling back to grid import there understates the interval by whatever
+    solar the house used on the spot, but it is a floor rather than a fiction,
+    and it is exact whenever there is no generation to miss.
+    """
+    if read.generation is None:
+        return read.consumed
+    return read.used if read.used is not None else read.consumed
+
+
 def history_truncated(
     partial_sum: float,
     partial_last: float | None,

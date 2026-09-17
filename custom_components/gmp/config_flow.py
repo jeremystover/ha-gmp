@@ -22,7 +22,7 @@ USER_SCHEMA = vol.Schema(
 class GmpConfigFlow(ConfigFlow, domain=DOMAIN):
     """Take the API key, then pick the service account to import."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
         self._key_id: str = ""

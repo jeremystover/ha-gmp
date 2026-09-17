@@ -462,3 +462,54 @@ class TestHistoryTruncated:
         # No generation meter: site and generation never fill at all.
         assert api.history_truncated(0.0, None, 41000.0, 1000.0) is False
         assert api.history_truncated(0.0, 1000.0, 0.0, None) is False
+
+
+class TestSiteUse:
+    """What an interval actually used, given GMP's two reporting channels."""
+
+    def _read(self, consumed, generation, returned):
+        used = None if generation is None else consumed + generation - returned
+        return api.UsageRead(
+            start=datetime(2026, 9, 9, 10, tzinfo=api.TIMEZONE),
+            consumed=consumed,
+            returned=returned,
+            generation=generation,
+            # GMP counts a missing generation figure as zero.
+            used=consumed + (generation or 0.0) - returned if used is None else used,
+        )
+
+    def test_generation_reported_uses_gmp_total(self):
+        # 2026-09-10 12:00Z: 0 imported, 24.02 made, 22.54 exported.
+        assert api.site_use(self._read(0.0, 24.02, 22.54)) == pytest.approx(1.48)
+
+    def test_no_solar_at_all_is_grid_import(self):
+        assert api.site_use(self._read(0.93, None, 0.0)) == pytest.approx(0.93)
+
+    def test_export_without_generation_never_goes_negative(self):
+        # 2026-09-09 11:00Z: 7.21 exported, generation channel silent. GMP
+        # reports -7.21; no house consumes a negative amount.
+        read = self._read(0.0, None, 7.21)
+        assert read.used == pytest.approx(-7.21)
+        assert api.site_use(read) == 0.0
+
+    def test_partial_export_without_generation_floors_at_import(self):
+        read = self._read(1.15, None, 2.73)
+        assert read.used == pytest.approx(-1.58)
+        assert api.site_use(read) == pytest.approx(1.15)
+
+    def test_a_day_of_real_rows_stays_non_negative(self):
+        # The nine hours of 2026-09-09 where export posted without generation.
+        day = [
+            (1.04, 0.1),
+            (1.15, 2.73),
+            (0.0, 6.67),
+            (0.0, 7.21),
+            (0.0, 6.85),
+            (0.07, 4.17),
+            (0.0, 2.83),
+            (0.0, 1.88),
+            (0.0, 1.51),
+        ]
+        values = [api.site_use(self._read(c, None, r)) for c, r in day]
+        assert all(v >= 0.0 for v in values)
+        assert sum(values) == pytest.approx(2.26)
