@@ -37,6 +37,9 @@ DAILY = "daily"
 MONTHLY = "monthly"
 
 BILL_TYPE = "Bill Segment"
+# The line whose quantity is days, and the one whose quantity is kilowatt-hours.
+CUSTOMER_CHARGE_LINE = "Customer Charge"
+ENERGY_LINE = "KWH"
 # A bill is dated about two days after the usage period it covers ends. The
 # portal uses the same offset when it links a bill to its usage.
 BILL_DATE_LAG = timedelta(days=2)
@@ -99,6 +102,22 @@ class Bill:
     bill_date: date
     period_start: datetime
     amount: float
+
+
+@dataclass(frozen=True)
+class Rates:
+    """What the newest bill actually charged, split by what each part scales with.
+
+    GMP bills one energy line plus several riders that all scale with usage, a
+    customer charge billed per day rather than per month, and a flat per-bill
+    fee. ``energy`` folds the riders in, so it is the whole marginal cost of a
+    kilowatt-hour -- meaningfully higher than the headline energy line alone.
+    """
+
+    bill_date: date
+    energy: float
+    customer: float
+    fixed: float
 
 
 # --- parsing ---------------------------------------------------------------
@@ -393,6 +412,32 @@ class GmpClient:
         except aiohttp.ClientError as err:
             raise GmpConnectionError(str(err)) from err
 
+    async def _post(
+        self,
+        path: str,
+        params: dict[str, str],
+        body: dict[str, Any],
+        *,
+        allow_404: bool = False,
+    ) -> Any:
+        try:
+            async with self._session.post(
+                f"{BASE_URL}{path}",
+                params=params,
+                json=body,
+                headers=HEADERS,
+                auth=self._auth,
+            ) as resp:
+                if resp.status in (401, 403):
+                    raise GmpAuthError(await _message(resp))
+                if resp.status == 404 and allow_404:
+                    return []
+                if resp.status >= 400:
+                    raise GmpError(f"POST {path} failed: HTTP {resp.status} {await _message(resp)}")
+                return await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            raise GmpConnectionError(str(err)) from err
+
     async def async_get_accounts(self) -> list[Account]:
         """List the service accounts the login can see."""
         user = await self._get("/users/current")
@@ -442,6 +487,30 @@ class GmpClient:
             return []
         return parse_periods(payload.get("periods") if isinstance(payload, dict) else payload)
 
+    async def async_get_rates(self, account: str, start: date, end: date) -> Rates | None:
+        """What the newest bill in the window charged per kWh, per day and per bill.
+
+        The portal's own bill-detail report, which is the only place GMP states
+        a rate: the usage and billing endpoints give kilowatt-hours and totals
+        but never a price.
+        """
+        try:
+            payload = await self._post(
+                f"/accounts/{account}/bills/line-items",
+                {"transpose": "true"},
+                {
+                    "includeColumns": ["quantity", "amount"],
+                    "startDate": start.isoformat(),
+                    "endDate": end.isoformat(),
+                    "includeRates": [],
+                },
+                allow_404=True,
+            )
+        except GmpError as err:
+            _LOGGER.debug("Bill line items unavailable: %s", err)
+            return None
+        return parse_rates(payload)
+
     async def async_get_bills(
         self, account: str, start: date, end: date, periods: list[tuple[date, date]]
     ) -> list[Bill]:
@@ -455,6 +524,78 @@ class GmpClient:
             transactions,
             [{"startDate": s.isoformat(), "endDate": e.isoformat()} for s, e in periods],
         )
+
+
+def _line_amounts(row: dict[str, Any]) -> dict[str, float]:
+    """Charge amounts by line name, dropping the rate schedule in the header."""
+    amounts: dict[str, float] = {}
+    for key, value in row.items():
+        if not key.endswith("_amt"):
+            continue
+        try:
+            amounts[key[:-4].split("(", 1)[0].strip()] = float(value or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return amounts
+
+
+def _line_quantity(row: dict[str, Any], line: str) -> float:
+    for key, value in row.items():
+        if key.endswith("_qty") and key[:-4].split("(", 1)[0].strip() == line:
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def parse_rates(rows: Any) -> Rates | None:
+    """Rates from the newest bill's line items, oldest row first.
+
+    A rider carries no quantity of its own, so what it scales with has to be
+    read off two bills: an amount that repeats unchanged while usage moves is a
+    flat fee, and anything else rides on the kilowatt-hours. With only one bill
+    to look at, riders are treated as usage-based -- the common case, and wrong
+    by cents rather than by the shape of the bill.
+    """
+    usable = [r for r in rows or [] if isinstance(r, dict) and r.get("Bill Date")]
+    if not usable:
+        return None
+    newest = usable[-1]
+    prior = usable[-2] if len(usable) > 1 else None
+
+    amounts = _line_amounts(newest)
+    kwh = _line_quantity(newest, ENERGY_LINE)
+    days = _line_quantity(newest, CUSTOMER_CHARGE_LINE)
+    customer_amt = amounts.pop(CUSTOMER_CHARGE_LINE, 0.0)
+    # The bill total is a bare column, not one of the "<line>_amt" pairs.
+    try:
+        total = float(newest.get("Bill Amount") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if kwh <= 0 or days <= 0 or total <= 0:
+        _LOGGER.debug("Line items for %s are not rateable", newest.get("Bill Date"))
+        return None
+
+    fixed = 0.0
+    if prior is not None:
+        before = _line_amounts(prior)
+        fixed = sum(
+            amount
+            for line, amount in amounts.items()
+            if line != ENERGY_LINE and amount == before.get(line)
+        )
+
+    try:
+        bill_date = parse_date(str(newest["Bill Date"]))
+    except (TypeError, ValueError):
+        return None
+    return Rates(
+        bill_date=bill_date,
+        energy=(total - customer_amt - fixed) / kwh,
+        customer=customer_amt / days,
+        fixed=fixed,
+    )
 
 
 def backfill_start(

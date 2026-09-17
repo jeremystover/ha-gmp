@@ -354,3 +354,84 @@ class TestBackfillStart:
 
     def test_missing_generation_alongside_stored_site_is_a_real_gap(self):
         assert api.backfill_start(300.0, 300.0, None, 300.0) is None
+
+
+# Two consecutive bills, verbatim from the portal's bill-detail report. The
+# rate schedule is in every column header, as GMP sends it.
+_R = "(Rate: E01 Residential)"
+LINE_ITEMS = [
+    {
+        "Bill Date": "2026-07-24",
+        "Bill Quantity": 1212.0,
+        "Bill Amount": 311.19,
+        f"Current Energy/Major Storm Adjustor{_R}_amt": 22.23,
+        f"Current Energy/Major Storm Adjustor{_R}_qty": 0.0,
+        f"Customer Charge{_R}_amt": 19.41,
+        f"Customer Charge{_R}_qty": 31.0,
+        f"Electric Assistance Program Fee{_R}_amt": 1.5,
+        f"Electric Assistance Program Fee{_R}_qty": 0.0,
+        f"Energy Efficiency Charge{_R}_amt": 12.68,
+        f"Energy Efficiency Charge{_R}_qty": 0.0,
+        f"Extreme Storm Restoration Fund{_R}_amt": 1.96,
+        f"Extreme Storm Restoration Fund{_R}_qty": 0.0,
+        f"KWH{_R}_amt": 253.41,
+        f"KWH{_R}_qty": 1181.0,
+    },
+    {
+        "Bill Date": "2026-08-25",
+        "Bill Quantity": 2024.0,
+        "Bill Amount": 510.03,
+        f"Current Energy/Major Storm Adjustor{_R}_amt": 36.47,
+        f"Current Energy/Major Storm Adjustor{_R}_qty": 0.0,
+        f"Customer Charge{_R}_amt": 20.03,
+        f"Customer Charge{_R}_qty": 32.0,
+        f"Electric Assistance Program Fee{_R}_amt": 1.5,
+        f"Electric Assistance Program Fee{_R}_qty": 0.0,
+        f"Energy Efficiency Charge{_R}_amt": 21.39,
+        f"Energy Efficiency Charge{_R}_qty": 0.0,
+        f"Extreme Storm Restoration Fund{_R}_amt": 3.22,
+        f"Extreme Storm Restoration Fund{_R}_qty": 0.0,
+        f"KWH{_R}_amt": 427.42,
+        f"KWH{_R}_qty": 1992.0,
+    },
+]
+
+
+class TestParseRates:
+    """Rates come from the bill; nothing else in the API states a price."""
+
+    def test_reads_the_newest_bill(self):
+        rates = api.parse_rates(LINE_ITEMS)
+        assert rates.bill_date == date(2026, 8, 25)
+
+    def test_energy_rate_includes_the_riders(self):
+        # The headline KWH line alone is 427.42/1992 = 0.2146. The three
+        # usage-scaled riders put the real marginal cost 14% above that.
+        rates = api.parse_rates(LINE_ITEMS)
+        assert rates.energy == pytest.approx(0.245231, abs=1e-6)
+
+    def test_customer_charge_is_per_day_not_per_month(self):
+        rates = api.parse_rates(LINE_ITEMS)
+        assert rates.customer == pytest.approx(0.625938, abs=1e-6)
+
+    def test_flat_fee_is_the_line_that_did_not_move(self):
+        # The assistance-program fee is 1.50 on both bills while usage jumped
+        # 1181 -> 1992 kWh, so it is per-bill, not per-kWh.
+        assert api.parse_rates(LINE_ITEMS).fixed == pytest.approx(1.5)
+
+    def test_the_parts_reconstruct_the_bill(self):
+        rates = api.parse_rates(LINE_ITEMS)
+        total = rates.energy * 1992 + rates.customer * 32 + rates.fixed
+        assert total == pytest.approx(510.03, abs=0.005)
+
+    def test_single_bill_treats_riders_as_usage_based(self):
+        rates = api.parse_rates(LINE_ITEMS[-1:])
+        assert rates.fixed == 0.0
+        assert rates.energy == pytest.approx((510.03 - 20.03) / 1992, abs=1e-6)
+
+    def test_no_bills_is_not_an_error(self):
+        assert api.parse_rates([]) is None
+        assert api.parse_rates(None) is None
+
+    def test_row_without_usage_is_not_rateable(self):
+        assert api.parse_rates([{"Bill Date": "2026-08-25", "Bill Amount": 20.0}]) is None

@@ -25,6 +25,8 @@ BILL_BACKFILL_DAYS = 3 * 365
 # missed. Rows already stored are never rewritten.
 USAGE_REFETCH_DAYS = 3
 BILL_REFETCH_DAYS = 45
+# Two bills: enough to tell a flat fee from a rider that scales with usage.
+RATES_LOOKBACK_DAYS = 120
 
 # Request windows, sized to what the portal itself asks for: hourly and
 # daily one billing period at a time, monthly a year at a time. GMP's limits

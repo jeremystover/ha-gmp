@@ -46,6 +46,7 @@ from .api import (
     GmpClient,
     GmpConnectionError,
     GmpError,
+    Rates,
     UsageRead,
     backfill_start,
     current_period,
@@ -56,6 +57,7 @@ from .api import (
 from .const import (
     BILL_BACKFILL_DAYS,
     BILL_REFETCH_DAYS,
+    RATES_LOOKBACK_DAYS,
     CONF_ACCOUNT_NUMBER,
     CONF_API_KEY_ID,
     CONF_API_KEY_SECRET,
@@ -111,6 +113,7 @@ class GmpData:
     last_bill: Bill | None
     has_generation: bool
     period: PeriodSummary
+    rates: Rates | None
 
 
 class GmpCoordinator(DataUpdateCoordinator[GmpData]):
@@ -164,6 +167,10 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             last_bill = await self._async_insert_cost(periods)
             credits = await self.client.async_get_credits(self.account_number)
             status = await self.client.async_get_status(self.account_number)
+            today = dt_util.now(TIMEZONE).date()
+            rates = await self.client.async_get_rates(
+                self.account_number, today - timedelta(days=RATES_LOOKBACK_DAYS), today
+            )
             period = await self._async_period_summary(periods, last_read, has_generation)
         except GmpAuthError as err:
             raise ConfigEntryAuthFailed from err
@@ -178,6 +185,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             last_bill=last_bill,
             has_generation=has_generation,
             period=period,
+            rates=rates,
         )
 
     # --- statistics plumbing ------------------------------------------------

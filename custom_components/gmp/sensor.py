@@ -24,6 +24,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .api import Rates
 from .coordinator import GmpConfigEntry, GmpCoordinator, PeriodSummary
 
 CURRENCY = "USD"
@@ -62,6 +63,28 @@ PERIOD_METRICS: tuple[PeriodMetric, ...] = (
 GENERATION_ONLY = frozenset({"period_generation", "period_site", "period_site_projected"})
 
 
+@dataclass(frozen=True)
+class RateMetric:
+    """One price from the newest bill, with the unit it is charged in."""
+
+    key: str
+    name: str
+    unit: str
+    value: Callable[[Rates], float]
+    digits: int
+
+
+RATES: tuple[RateMetric, ...] = (
+    # Every usage-scaled line, not just the headline energy charge: the riders
+    # GMP adds on top are a real part of what one more kilowatt-hour costs.
+    RateMetric("rate_energy", "Energy rate", f"{CURRENCY}/kWh", lambda r: r.energy, 5),
+    # Billed per day, so a 28-day period and a 32-day one differ by over a
+    # dollar. Anything modelling this as a monthly figure is wrong twice a year.
+    RateMetric("rate_customer", "Customer charge", f"{CURRENCY}/d", lambda r: r.customer, 5),
+    RateMetric("rate_fixed", "Fixed bill charges", CURRENCY, lambda r: r.fixed, 2),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: GmpConfigEntry,
@@ -78,6 +101,7 @@ async def async_setup_entry(
         GmpPeriodEnd(coordinator, entry),
         GmpPeriodProgress(coordinator, entry),
     ]
+    entities.extend(GmpRate(coordinator, entry, rate) for rate in RATES)
     entities.extend(
         GmpPeriodEnergy(coordinator, entry, metric)
         for metric in PERIOD_METRICS
@@ -301,3 +325,32 @@ class GmpPeriodEnergy(GmpEntity):
             "period_end": period.end.isoformat(),
             "days_with_data": period.days_with_data,
         }
+
+
+class GmpRate(GmpEntity):
+    """A price read off the most recent bill.
+
+    GMP states rates nowhere else: the usage endpoints give kilowatt-hours and
+    the billing endpoints give totals, so the only way to learn what a unit
+    costs is to divide a bill by what it billed for.
+    """
+
+    def __init__(
+        self, coordinator: GmpCoordinator, entry: GmpConfigEntry, rate: RateMetric
+    ) -> None:
+        super().__init__(coordinator, entry, rate.key)
+        self._rate = rate
+        self._attr_name = rate.name
+        self._attr_native_unit_of_measurement = rate.unit
+
+    @property
+    def native_value(self) -> float | None:
+        """The rate, or None until a bill has been read."""
+        rates = self.coordinator.data.rates
+        return round(self._rate.value(rates), self._rate.digits) if rates else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Which bill the rate was taken from."""
+        rates = self.coordinator.data.rates
+        return {"bill_date": rates.bill_date.isoformat()} if rates else {}
