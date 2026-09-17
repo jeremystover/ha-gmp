@@ -10,7 +10,7 @@ CONF_API_KEY_SECRET = "api_key_secret"
 
 # GMP posts meter data with a delay of hours to a day. Twice a day keeps the
 # dashboard at most half a day further behind than GMP itself.
-UPDATE_INTERVAL_HOURS = 12
+UPDATE_INTERVAL_HOURS = 24
 
 # First-run backfill: monthly reads for the long tail, daily for the last
 # year, hourly for the recent stretch -- the cascade Home Assistant's own
