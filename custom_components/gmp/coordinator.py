@@ -175,6 +175,12 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             credits = await self.client.async_get_credits(self.account_number)
             status = await self.client.async_get_status(self.account_number)
             rates = await self._async_rates(last_bill)
+            # The period sensors read back what the writes above queued, and
+            # the recorder runs them on its own thread. Without waiting, a
+            # refresh that rebuilds the series reports the state it replaced --
+            # or nothing at all, on the refresh right after a migration clears
+            # it -- until the next poll a day later.
+            await get_instance(self.hass).async_block_till_done()
             period = await self._async_period_summary(periods, last_read, has_generation)
         except GmpAuthError as err:
             raise ConfigEntryAuthFailed from err
