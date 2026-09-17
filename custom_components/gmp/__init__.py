@@ -19,10 +19,13 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Move a version 1 entry off the portal password and onto an API key.
+    """Bring an entry up to the current version, one step at a time.
 
-    There is nothing to convert -- a password cannot become a key -- so the old
-    credentials are dropped and setup asks for the key through reauth.
+    Version 1 held a portal password. Nothing converts it -- a password cannot
+    become an API key -- so the credentials are dropped and setup asks for a
+    key through reauth. Version 2 carries site-consumption statistics computed
+    from a field that misreports while the generation channel is silent, so
+    they are cleared for the next refresh to rebuild.
     """
     if entry.version == 1:
         account = entry.data[CONF_ACCOUNT_NUMBER]
