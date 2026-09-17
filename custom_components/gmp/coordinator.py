@@ -63,6 +63,7 @@ from .const import (
     RATES_LOOKBACK_DAYS,
     REBUILD_RECHECK_SECONDS,
     CONF_ACCOUNT_NUMBER,
+    CONF_REBUILD_SITE,
     CONF_API_KEY_ID,
     CONF_API_KEY_SECRET,
     DAILY_BACKFILL_DAYS,
@@ -209,6 +210,12 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             rates=rates,
         )
 
+    def _clear_site(self, why: str) -> None:
+        """Drop the site series so the fetch below can lay it down again."""
+        stat = self.statistic_id("energy_site")
+        _LOGGER.warning("Rebuilding %s: %s", stat, why)
+        get_instance(self.hass).async_clear_statistics([stat])
+
     async def _async_recheck(self, _now: datetime) -> None:
         """Refresh once the recorder has had time to store a rebuilt series."""
         await self.async_request_refresh()
@@ -278,18 +285,24 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         base_generation, last_generation = await self._async_last("energy_generation")
         base_used, last_used = await self._async_last("energy_site")
 
+        if self.config_entry.data.get(CONF_REBUILD_SITE):
+            # A migration asked for this. Clear and forget the cursor together:
+            # the clear goes through the recorder's queue while the reads above
+            # came straight off the database, so what they saw is already on
+            # its way out and appending to it would write rows the clear then
+            # deletes.
+            self._clear_site("a migration asked for it")
+            base_used, last_used = 0.0, None
+            data = {k: v for k, v in self.config_entry.data.items() if k != CONF_REBUILD_SITE}
+            self.hass.config_entries.async_update_entry(self.config_entry, data=data)
         # A version of this integration that shared one cursor across series
         # started site consumption at whatever the others had already reached,
         # leaving it permanently short of its own history. Clearing it is the
         # only way back: the rebuild below then refills it from the start.
-        if history_truncated(base_used, last_used, base_consumption, last_consumption):
-            _LOGGER.warning(
-                "Rebuilding %s: %.0f kWh stored against %.0f kWh of consumption",
-                self.statistic_id("energy_site"),
-                base_used,
-                base_consumption,
+        elif history_truncated(base_used, last_used, base_consumption, last_consumption):
+            self._clear_site(
+                f"{base_used:.0f} kWh stored against {base_consumption:.0f} kWh of consumption"
             )
-            get_instance(self.hass).async_clear_statistics([self.statistic_id("energy_site")])
             base_used, last_used = 0.0, None
 
         cursor = backfill_start(last_consumption, last_return, last_generation, last_used)

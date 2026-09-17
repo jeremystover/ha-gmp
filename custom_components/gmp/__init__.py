@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.recorder import get_instance
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from .const import CONF_ACCOUNT_NUMBER, CONF_API_KEY_ID, CONF_API_KEY_SECRET
-from .coordinator import GmpConfigEntry, GmpCoordinator, statistic_id
+from .const import (
+    CONF_ACCOUNT_NUMBER,
+    CONF_API_KEY_ID,
+    CONF_API_KEY_SECRET,
+    CONF_REBUILD_SITE,
+)
+from .coordinator import GmpConfigEntry, GmpCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,26 +38,18 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry, data={CONF_ACCOUNT_NUMBER: account}, version=2
         )
         _LOGGER.info("GMP entry migrated to API key auth; a new key is needed")
-    if entry.version == 2:
-        # Site consumption was written straight from GMP's totalEnergyUsed,
-        # which counts an unreported generation figure as zero and so goes
-        # negative under the array. A stored row is never rewritten, so the
-        # bad intervals have to be dropped for the next refresh to replace
-        # them.
-        stat = statistic_id(entry.data[CONF_ACCOUNT_NUMBER], "energy_site")
-        get_instance(hass).async_clear_statistics([stat])
-        hass.config_entries.async_update_entry(entry, version=3)
-        _LOGGER.info("Cleared %s; it will be rebuilt on the next refresh", stat)
-    if entry.version == 3:
-        # The version 3 rebuild ran while setup could still deadlock, so a
-        # restart could land in the middle of it and leave the tail of the
-        # series behind. What survives carries the running sum of everything
-        # deleted underneath it, which reads as a series that is complete and
-        # ahead of consumption rather than one with its history missing.
-        stat = statistic_id(entry.data[CONF_ACCOUNT_NUMBER], "energy_site")
-        get_instance(hass).async_clear_statistics([stat])
-        hass.config_entries.async_update_entry(entry, version=4)
-        _LOGGER.info("Cleared %s again; a partial rebuild cannot be detected", stat)
+    if entry.version in (2, 3):
+        # Site consumption cannot be corrected in place: version 2 wrote it
+        # straight from GMP's totalEnergyUsed, which counts an unreported
+        # generation figure as zero and so goes negative under the array, and
+        # version 3 could be left half rebuilt by a restart. Clearing it is
+        # the coordinator's job rather than this one -- it has to happen in
+        # the same breath as resetting the cursor that decides what to fetch,
+        # or the refresh reads the rows on their way out and appends to them.
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REBUILD_SITE: True}, version=4
+        )
+        _LOGGER.info("Site consumption will be rebuilt on the next refresh")
     return True
 
 

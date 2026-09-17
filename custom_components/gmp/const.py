@@ -7,6 +7,8 @@ CONF_ACCOUNT_NUMBER = "account_number"
 # HTTP Basic credentials. Ask software engineering at Green Mountain Power.
 CONF_API_KEY_ID = "api_key_id"
 CONF_API_KEY_SECRET = "api_key_secret"
+# Set by a migration, acted on by the coordinator, then removed.
+CONF_REBUILD_SITE = "rebuild_site"
 
 # GMP posts meter data with a delay of hours to a day. Twice a day keeps the
 # dashboard at most half a day further behind than GMP itself.
