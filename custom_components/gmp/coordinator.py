@@ -145,6 +145,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             update_interval=timedelta(hours=UPDATE_INTERVAL_HOURS),
         )
         self._rebuilt = False
+        self._rechecked = False
         self.client = GmpClient(
             async_get_clientsession(hass),
             entry.data[CONF_API_KEY_ID],
@@ -185,13 +186,18 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             raise UpdateFailed(f"Cannot reach GMP: {err}") from err
         except GmpError as err:
             raise UpdateFailed(str(err)) from err
-        if self._rebuilt:
+        if self._rebuilt and not self._rechecked:
             # The rows just queued are not readable yet, so the period above
             # describes the series they replaced. Waiting here would deadlock:
             # this runs inside config entry setup, and the recorder does not
             # drain its queue until Home Assistant has finished starting --
             # which waits on this setup. So come back for it later instead.
             self._rebuilt = False
+            # Once per run. If the recorder still has not caught up by then,
+            # the scheduled poll takes it from there: a recheck that rebuilds
+            # and reschedules itself would fetch three years of usage on a
+            # loop.
+            self._rechecked = True
             async_call_later(self.hass, REBUILD_RECHECK_SECONDS, self._async_recheck)
         return GmpData(
             credits=credits,
