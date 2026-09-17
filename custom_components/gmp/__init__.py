@@ -23,9 +23,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     Version 1 held a portal password. Nothing converts it -- a password cannot
     become an API key -- so the credentials are dropped and setup asks for a
-    key through reauth. Version 2 carries site-consumption statistics computed
-    from a field that misreports while the generation channel is silent, so
-    they are cleared for the next refresh to rebuild.
+    key through reauth. Versions 2 and 3 carry site-consumption statistics
+    that cannot be corrected in place -- computed from a field that misreports
+    while the generation channel is silent, then left half rebuilt -- so they
+    are cleared for the next refresh to rebuild.
     """
     if entry.version == 1:
         account = entry.data[CONF_ACCOUNT_NUMBER]
@@ -43,6 +44,16 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         get_instance(hass).async_clear_statistics([stat])
         hass.config_entries.async_update_entry(entry, version=3)
         _LOGGER.info("Cleared %s; it will be rebuilt on the next refresh", stat)
+    if entry.version == 3:
+        # The version 3 rebuild ran while setup could still deadlock, so a
+        # restart could land in the middle of it and leave the tail of the
+        # series behind. What survives carries the running sum of everything
+        # deleted underneath it, which reads as a series that is complete and
+        # ahead of consumption rather than one with its history missing.
+        stat = statistic_id(entry.data[CONF_ACCOUNT_NUMBER], "energy_site")
+        get_instance(hass).async_clear_statistics([stat])
+        hass.config_entries.async_update_entry(entry, version=4)
+        _LOGGER.info("Cleared %s again; a partial rebuild cannot be detected", stat)
     return True
 
 
