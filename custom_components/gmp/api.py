@@ -455,3 +455,27 @@ class GmpClient:
             transactions,
             [{"startDate": s.isoformat(), "endDate": e.isoformat()} for s, e in periods],
         )
+
+
+def backfill_start(
+    consumption: float | None,
+    returned: float | None,
+    generation: float | None,
+    used: float | None,
+) -> float | None:
+    """Oldest point any maintained series still needs, as a fetch cursor.
+
+    Each series carries its own cursor, so a series introduced by an upgrade
+    has none and must be filled from the beginning -- returning ``None`` asks
+    for the full cascade rather than the refetch window.
+
+    Generation and site consumption exist only on accounts with a generation
+    meter. Both empty means no such meter rather than a gap; one of the two
+    holding rows makes the other's emptiness a real gap.
+    """
+    starts = [consumption, returned]
+    if generation is not None or used is not None:
+        starts += [generation, used]
+    if any(start is None for start in starts):
+        return None
+    return min(starts)

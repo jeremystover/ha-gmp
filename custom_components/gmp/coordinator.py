@@ -47,6 +47,7 @@ from .api import (
     GmpConnectionError,
     GmpError,
     UsageRead,
+    backfill_start,
     current_period,
     interval_end,
     merge_reads,
@@ -219,27 +220,29 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
     # --- usage --------------------------------------------------------------
 
     async def _async_insert_usage(self) -> tuple[datetime | None, bool]:
-        base_consumption, last_start = await self._async_last("energy_consumption")
-        base_return, _ = await self._async_last("energy_return")
-        base_generation, _ = await self._async_last("energy_generation")
-        base_used, _ = await self._async_last("energy_site")
+        base_consumption, last_consumption = await self._async_last("energy_consumption")
+        base_return, last_return = await self._async_last("energy_return")
+        base_generation, last_generation = await self._async_last("energy_generation")
+        base_used, last_used = await self._async_last("energy_site")
 
-        reads = await self._async_fetch_reads(last_start)
+        reads = await self._async_fetch_reads(
+            backfill_start(last_consumption, last_return, last_generation, last_used)
+        )
         if not reads:
             _LOGGER.debug("No usage reads returned")
-            last = dt_util.utc_from_timestamp(last_start) if last_start else None
+            last = dt_util.utc_from_timestamp(last_consumption) if last_consumption else None
             return last, base_generation > 0
 
         self._add(
             "energy_consumption",
             "consumption",
-            self._rows([(r.start, r.consumed) for r in reads], base_consumption, last_start),
+            self._rows([(r.start, r.consumed) for r in reads], base_consumption, last_consumption),
             energy=True,
         )
         self._add(
             "energy_return",
             "return",
-            self._rows([(r.start, r.returned) for r in reads], base_return, last_start),
+            self._rows([(r.start, r.returned) for r in reads], base_return, last_return),
             energy=True,
         )
         # Only accounts with a generation meter get these fields at all.
@@ -251,7 +254,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
                 self._rows(
                     [(r.start, r.generation or 0.0) for r in reads],
                     base_generation,
-                    last_start,
+                    last_generation,
                 ),
                 energy=True,
             )
@@ -263,7 +266,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
                 self._rows(
                     [(r.start, r.used if r.used is not None else r.consumed) for r in reads],
                     base_used,
-                    last_start,
+                    last_used,
                 ),
                 energy=True,
             )

@@ -307,8 +307,7 @@ def test_a_row_without_total_energy_used_has_none():
 
 def test_trailing_generation_without_export_is_held_back():
     posted = [
-        api.UsageRead(datetime(2026, 9, 16, h, tzinfo=TZ), 0.1, 0.5, 2.0, 1.6)
-        for h in range(9, 11)
+        api.UsageRead(datetime(2026, 9, 16, h, tzinfo=TZ), 0.1, 0.5, 2.0, 1.6) for h in range(9, 11)
     ]
     provisional = [
         api.UsageRead(datetime(2026, 9, 16, h, tzinfo=TZ), 0.1, 0.0, 5.0, 5.1)
@@ -332,3 +331,26 @@ def test_a_fully_self_consumed_hour_mid_series_is_kept():
 def test_trim_leaves_a_series_with_no_generation_alone():
     reads = [api.UsageRead(datetime(2026, 8, d, tzinfo=TZ), 12.0, 0.0, None) for d in range(1, 5)]
     assert api.trim_provisional(reads) == reads
+
+
+class TestBackfillStart:
+    """The fetch cursor across series that fill at different times."""
+
+    def test_all_empty_asks_for_full_history(self):
+        assert api.backfill_start(None, None, None, None) is None
+
+    def test_settled_account_uses_oldest_cursor(self):
+        assert api.backfill_start(300.0, 200.0, 250.0, 275.0) == 200.0
+
+    def test_account_without_generation_meter_ignores_absent_series(self):
+        # Generation and site never fill here, and must not force a refetch.
+        assert api.backfill_start(300.0, 200.0, None, None) == 200.0
+
+    def test_series_added_by_upgrade_backfills_from_the_start(self):
+        # The regression: site consumption arrived after the others were
+        # already current, and inherited their cursor, so every historical
+        # row was dropped as "already stored".
+        assert api.backfill_start(300.0, 300.0, 300.0, None) is None
+
+    def test_missing_generation_alongside_stored_site_is_a_real_gap(self):
+        assert api.backfill_start(300.0, 300.0, None, 300.0) is None
