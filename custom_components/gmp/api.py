@@ -616,6 +616,11 @@ def site_use(read: UsageRead) -> float:
     return read.used if read.used is not None else read.consumed
 
 
+def period_total(points: list[tuple[datetime, float]], start: date, end: date) -> float:
+    """Sum interval values whose local date falls inside a billing period."""
+    return sum(value for when, value in points if start <= when.astimezone(TIMEZONE).date() <= end)
+
+
 def history_truncated(
     partial_sum: float,
     partial_last: float | None,

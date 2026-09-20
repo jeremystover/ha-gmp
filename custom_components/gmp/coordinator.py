@@ -52,6 +52,7 @@ from .api import (
     backfill_start,
     current_period,
     history_truncated,
+    period_total,
     site_use,
     interval_end,
     merge_reads,
@@ -147,6 +148,8 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         )
         self._rebuilt = False
         self._rechecked = False
+        # Rows written this run, still on the recorder's queue.
+        self._pending: dict[str, list[tuple[datetime, float]]] = {}
         self.client = GmpClient(
             async_get_clientsession(hass),
             entry.data[CONF_API_KEY_ID],
@@ -272,6 +275,10 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         return rows
 
     def _add(self, kind: str, label: str, rows: list[StatisticData], *, energy: bool) -> None:
+        # Remember them: the period summary reads the recorder straight from
+        # the database, so rows still queued here are invisible to it and the
+        # sensors would describe the run before this one.
+        self._pending[kind] = [(row["start"], float(row["state"] or 0.0)) for row in rows]
         if not rows:
             return
         _LOGGER.debug("Adding %d rows to %s", len(rows), self.statistic_id(kind))
@@ -280,6 +287,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
     # --- usage --------------------------------------------------------------
 
     async def _async_insert_usage(self) -> tuple[datetime | None, bool]:
+        self._pending = {}
         base_consumption, last_consumption = await self._async_last("energy_consumption")
         base_return, last_return = await self._async_last("energy_return")
         base_generation, last_generation = await self._async_last("energy_generation")
@@ -475,7 +483,8 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
 
         def total(kind: str) -> float:
             rows = stats.get(self.statistic_id(kind), []) if stats else []
-            return sum(float(row.get("change") or 0.0) for row in rows)
+            stored = sum(float(row.get("change") or 0.0) for row in rows)
+            return stored + period_total(self._pending.get(kind, []), start, end)
 
         last_day = last_read.astimezone(TIMEZONE).date() if last_read else None
         days_with_data = 0

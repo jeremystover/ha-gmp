@@ -8,7 +8,7 @@ the credits shape is what the GMP portal's net-metering widget reads.
 import importlib.util
 import pathlib
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -513,3 +513,32 @@ class TestSiteUse:
         values = [api.site_use(self._read(c, None, r)) for c, r in day]
         assert all(v >= 0.0 for v in values)
         assert sum(values) == pytest.approx(2.26)
+
+
+class TestPeriodTotal:
+    """Rows still on the recorder's queue, tallied against the period."""
+
+    def _at(self, day, hour=12):
+        return datetime(2026, 9, day, hour, tzinfo=api.TIMEZONE)
+
+    def test_sums_what_falls_inside(self):
+        points = [(self._at(18), 5.0), (self._at(19), 7.0)]
+        assert api.period_total(points, date(2026, 8, 25), date(2026, 9, 24)) == pytest.approx(12.0)
+
+    def test_drops_what_falls_outside(self):
+        # The refetch window reaches back before the period began.
+        points = [(self._at(18), 5.0), (datetime(2026, 8, 24, 12, tzinfo=api.TIMEZONE), 9.88)]
+        assert api.period_total(points, date(2026, 8, 25), date(2026, 9, 24)) == pytest.approx(5.0)
+
+    def test_period_end_is_inclusive(self):
+        points = [(self._at(24, 23), 3.0)]
+        assert api.period_total(points, date(2026, 8, 25), date(2026, 9, 24)) == pytest.approx(3.0)
+
+    def test_nothing_pending_contributes_nothing(self):
+        assert api.period_total([], date(2026, 8, 25), date(2026, 9, 24)) == 0.0
+
+    def test_utc_rows_are_judged_by_local_date(self):
+        # Statistics rows are stored in UTC; 03:00Z on the 25th is still the
+        # 24th in GMP's timezone, and outside a period starting on the 25th.
+        points = [(datetime(2026, 8, 25, 3, tzinfo=timezone.utc), 4.0)]
+        assert api.period_total(points, date(2026, 8, 25), date(2026, 9, 24)) == 0.0
