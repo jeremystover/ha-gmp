@@ -91,8 +91,9 @@ class PeriodSummary:
     days_total: int
     # Days for which GMP has published reads, counted from ``start``.
     days_with_data: int
-    import_kwh: float
-    export_kwh: float
+    # None when the statistics do not cover the whole period.
+    import_kwh: float | None
+    export_kwh: float | None
     generation_kwh: float | None
     # Everything the property consumed, grid and solar together. GMP reports
     # it per interval; None on accounts with no generation meter.
@@ -116,8 +117,9 @@ class PeriodTotals:
 
     start: date
     end: date
-    import_kwh: float
-    export_kwh: float
+    # None when the statistics do not cover the whole period.
+    import_kwh: float | None
+    export_kwh: float | None
     generation_kwh: float | None
     used_kwh: float | None
     # What GMP billed for it; negative when credits outran charges.
@@ -515,6 +517,14 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             return found
 
         series = {kind: points(kind) for kind in kinds}
+        # Bills reach back further than usage does, so a period can have a real
+        # amount and no readings behind it. Reporting the handful of hours that
+        # happen to fall inside it would read as a month of near-zero use rather
+        # than as the gap it is.
+        usage_from = min(
+            (when.astimezone(TIMEZONE).date() for when, _ in series["energy_consumption"]),
+            default=None,
+        )
 
         def total(kind: str, start: date, end: date) -> float:
             return period_total(series.get(kind, []), start, end)
@@ -525,17 +535,24 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             # cost, a month the credits won in compensation.
             charged = total("energy_cost", start, end)
             paid = total("energy_compensation", start, end)
+            metered = usage_from is not None and start >= usage_from
             history.append(
                 PeriodTotals(
                     start=start,
                     end=end,
-                    import_kwh=round(total("energy_consumption", start, end), 1),
-                    export_kwh=round(total("energy_return", start, end), 1),
+                    import_kwh=round(total("energy_consumption", start, end), 1)
+                    if metered
+                    else None,
+                    export_kwh=round(total("energy_return", start, end), 1) if metered else None,
                     generation_kwh=(
-                        round(total("energy_generation", start, end), 1) if has_generation else None
+                        round(total("energy_generation", start, end), 1)
+                        if metered and has_generation
+                        else None
                     ),
                     used_kwh=(
-                        round(total("energy_site", start, end), 1) if has_generation else None
+                        round(total("energy_site", start, end), 1)
+                        if metered and has_generation
+                        else None
                     ),
                     bill=round(charged - paid, 2) if charged or paid else None,
                 )
