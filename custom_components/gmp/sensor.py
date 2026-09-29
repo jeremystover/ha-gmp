@@ -57,10 +57,22 @@ PERIOD_METRICS: tuple[PeriodMetric, ...] = (
         "Projected site consumption",
         lambda p: p.projected(p.used_kwh) if p.used_kwh is not None else None,
     ),
+    PeriodMetric(
+        "period_generation_projected",
+        "Projected generation",
+        lambda p: p.projected(p.generation_kwh) if p.generation_kwh is not None else None,
+    ),
 )
 
 # Fields GMP only fills in for an account with a generation meter.
-GENERATION_ONLY = frozenset({"period_generation", "period_site", "period_site_projected"})
+GENERATION_ONLY = frozenset(
+    {
+        "period_generation",
+        "period_site",
+        "period_site_projected",
+        "period_generation_projected",
+    }
+)
 
 
 @dataclass(frozen=True)
