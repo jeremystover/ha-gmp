@@ -550,7 +550,24 @@ def _line_quantity(row: dict[str, Any], line: str) -> float:
 
 
 def parse_rates(rows: Any) -> Rates | None:
-    """Rates from the newest bill's line items, oldest row first.
+    """Rates from the newest bill that states them, oldest row first.
+
+    A net-metered bill need not price a kilowatt-hour at all: once generation
+    covers consumption the energy line disappears and the total can be a
+    credit, which decomposes into nothing. Walking back to the last bill that
+    does price one keeps the rates from vanishing on the next restart, when
+    there is no longer a value in memory to fall back to.
+    """
+    usable = [r for r in rows or [] if isinstance(r, dict) and r.get("Bill Date")]
+    for index in range(len(usable) - 1, -1, -1):
+        rates = _rates_from(usable[index], usable[index - 1] if index else None)
+        if rates is not None:
+            return rates
+    return None
+
+
+def _rates_from(newest: dict[str, Any], prior: dict[str, Any] | None) -> Rates | None:
+    """Split one bill into a price per kWh, per day and per bill.
 
     A rider carries no quantity of its own, so what it scales with has to be
     read off two bills: an amount that repeats unchanged while usage moves is a
@@ -558,12 +575,6 @@ def parse_rates(rows: Any) -> Rates | None:
     to look at, riders are treated as usage-based -- the common case, and wrong
     by cents rather than by the shape of the bill.
     """
-    usable = [r for r in rows or [] if isinstance(r, dict) and r.get("Bill Date")]
-    if not usable:
-        return None
-    newest = usable[-1]
-    prior = usable[-2] if len(usable) > 1 else None
-
     amounts = _line_amounts(newest)
     kwh = _line_quantity(newest, ENERGY_LINE)
     days = _line_quantity(newest, CUSTOMER_CHARGE_LINE)

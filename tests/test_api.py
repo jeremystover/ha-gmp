@@ -542,3 +542,43 @@ class TestPeriodTotal:
         # 24th in GMP's timezone, and outside a period starting on the 25th.
         points = [(datetime(2026, 8, 25, 3, tzinfo=timezone.utc), 4.0)]
         assert api.period_total(points, date(2026, 8, 25), date(2026, 9, 24)) == 0.0
+
+
+# The first net-metered bill: generation covered consumption, so there is no
+# KWH line to price and the total is a credit.
+SOLAR_BILL = {
+    "Bill Date": "2026-09-24",
+    "Bill Quantity": 2721.0,
+    "Bill Amount": -3.64,
+    "Customer Charge(Residential non bypassable charges)_amt": 19.41,
+    "Customer Charge(Residential non bypassable charges)_qty": 31.0,
+    "Electric Assistance Program Fee(Residential non bypassable charges)_amt": 1.5,
+    "Electric Assistance Program Fee(Residential non bypassable charges)_qty": 0.0,
+    "Energy Efficiency Charge(Residential non bypassable charges)_amt": 15.87,
+    "Energy Efficiency Charge(Residential non bypassable charges)_qty": 0.0,
+    "Excess Credit(Rate:  E01 Residential Net Metering)_amt": -125.5,
+    "Excess Credit(Rate:  E01 Residential Net Metering)_qty": 606.0,
+    "Solar Siting Adjustor(Interconnected Generation)_amt": 83.36,
+    "Solar Siting Adjustor(Interconnected Generation)_qty": 2084.0,
+}
+
+
+class TestRatesFallBackPastUnpricedBills:
+    """A credit bill prices nothing; the rates must not vanish with it."""
+
+    def test_a_credit_bill_alone_yields_nothing(self):
+        assert api.parse_rates([SOLAR_BILL]) is None
+
+    def test_falls_back_to_the_last_bill_that_priced_a_kwh(self):
+        rates = api.parse_rates(LINE_ITEMS + [SOLAR_BILL])
+        assert rates is not None
+        assert rates.bill_date == date(2026, 8, 25)
+        assert rates.energy == pytest.approx(0.245231, abs=1e-6)
+
+    def test_a_priceable_newest_bill_still_wins(self):
+        assert api.parse_rates(LINE_ITEMS).bill_date == date(2026, 8, 25)
+
+    def test_several_credit_bills_do_not_bury_the_rates(self):
+        later = dict(SOLAR_BILL, **{"Bill Date": "2026-10-26"})
+        rates = api.parse_rates(LINE_ITEMS + [SOLAR_BILL, later])
+        assert rates.bill_date == date(2026, 8, 25)
