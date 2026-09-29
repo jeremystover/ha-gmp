@@ -70,6 +70,7 @@ from .const import (
     DAILY_BACKFILL_DAYS,
     DAILY_CHUNK_DAYS,
     DOMAIN,
+    HISTORY_PERIODS,
     HOURLY_BACKFILL_DAYS,
     HOURLY_CHUNK_DAYS,
     MONTHLY_BACKFILL_DAYS,
@@ -109,6 +110,20 @@ class PeriodSummary:
         return value / self.days_with_data * self.days_total
 
 
+@dataclass(frozen=True)
+class PeriodTotals:
+    """One completed billing period, for comparing against another."""
+
+    start: date
+    end: date
+    import_kwh: float
+    export_kwh: float
+    generation_kwh: float | None
+    used_kwh: float | None
+    # What GMP billed for it; negative when credits outran charges.
+    bill: float | None
+
+
 @dataclass
 class GmpData:
     """What the sensors show between statistics runs."""
@@ -120,6 +135,7 @@ class GmpData:
     has_generation: bool
     period: PeriodSummary
     rates: Rates | None
+    history: list[PeriodTotals]
 
 
 def statistic_id(account: str, kind: str) -> str:
@@ -184,6 +200,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             status = await self.client.async_get_status(self.account_number)
             rates = await self._async_rates(last_bill)
             period = await self._async_period_summary(periods, last_read, has_generation)
+            history = await self._async_history(periods, has_generation)
         except GmpAuthError as err:
             raise ConfigEntryAuthFailed from err
         except GmpConnectionError as err:
@@ -211,6 +228,7 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
             has_generation=has_generation,
             period=period,
             rates=rates,
+            history=history,
         )
 
     def _clear_site(self, why: str) -> None:
@@ -456,6 +474,73 @@ class GmpCoordinator(DataUpdateCoordinator[GmpData]):
         return bills[-1]
 
     # --- billing period in progress -------------------------------------------
+
+    async def _async_history(
+        self, periods: list[tuple[date, date]], has_generation: bool
+    ) -> list[PeriodTotals]:
+        """Totals for each completed billing period, newest first.
+
+        One statistics query covers every period at once; the daily rows it
+        returns are then bucketed by the dates GMP itself billed, so a period
+        here spans exactly what the bill for it spanned.
+        """
+        today = dt_util.now(TIMEZONE).date()
+        done = [(s, e) for s, e in periods if e < today][-HISTORY_PERIODS:]
+        if not done:
+            return []
+        kinds = ["energy_consumption", "energy_return"]
+        if has_generation:
+            kinds += ["energy_generation", "energy_site"]
+        kinds += ["energy_cost", "energy_compensation"]
+        stats = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            dt_util.as_utc(datetime.combine(done[0][0], datetime.min.time(), tzinfo=TIMEZONE)),
+            None,
+            {self.statistic_id(kind) for kind in kinds},
+            "day",
+            None,
+            {"change"},
+        )
+
+        def points(kind: str) -> list[tuple[datetime, float]]:
+            rows = stats.get(self.statistic_id(kind), []) if stats else []
+            found: list[tuple[datetime, float]] = []
+            for row in rows:
+                raw = row.get("start")
+                if raw is None:
+                    continue
+                when = raw if isinstance(raw, datetime) else dt_util.utc_from_timestamp(float(raw))
+                found.append((when, float(row.get("change") or 0.0)))
+            return found
+
+        series = {kind: points(kind) for kind in kinds}
+
+        def total(kind: str, start: date, end: date) -> float:
+            return period_total(series.get(kind, []), start, end)
+
+        history: list[PeriodTotals] = []
+        for start, end in reversed(done):
+            # A bill lands in one series or the other, never both: charges in
+            # cost, a month the credits won in compensation.
+            charged = total("energy_cost", start, end)
+            paid = total("energy_compensation", start, end)
+            history.append(
+                PeriodTotals(
+                    start=start,
+                    end=end,
+                    import_kwh=round(total("energy_consumption", start, end), 1),
+                    export_kwh=round(total("energy_return", start, end), 1),
+                    generation_kwh=(
+                        round(total("energy_generation", start, end), 1) if has_generation else None
+                    ),
+                    used_kwh=(
+                        round(total("energy_site", start, end), 1) if has_generation else None
+                    ),
+                    bill=round(charged - paid, 2) if charged or paid else None,
+                )
+            )
+        return history
 
     async def _async_period_summary(
         self,

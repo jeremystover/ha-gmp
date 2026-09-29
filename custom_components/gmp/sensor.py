@@ -100,6 +100,7 @@ async def async_setup_entry(
         GmpPeriodStart(coordinator, entry),
         GmpPeriodEnd(coordinator, entry),
         GmpPeriodProgress(coordinator, entry),
+        GmpBillingHistory(coordinator, entry),
     ]
     entities.extend(GmpRate(coordinator, entry, rate) for rate in RATES)
     entities.extend(
@@ -354,3 +355,45 @@ class GmpRate(GmpEntity):
         """Which bill the rate was taken from."""
         rates = self.coordinator.data.rates
         return {"bill_date": rates.bill_date.isoformat()} if rates else {}
+
+
+class GmpBillingHistory(GmpEntity):
+    """Completed billing periods, so one can be read against another.
+
+    The totals live in the recorder's statistics, which a dashboard template
+    cannot query -- only current states are reachable from Jinja. Carrying
+    them as attributes puts a period's whole history somewhere a card can
+    render it.
+    """
+
+    _attr_name = "Billing history"
+    _attr_icon = "mdi:table-clock"
+    # Re-stating a year of periods into the database on every refresh would
+    # grow it for nothing: the numbers are already stored as statistics.
+    _unrecorded_attributes = frozenset({"periods"})
+
+    def __init__(self, coordinator: GmpCoordinator, entry: GmpConfigEntry) -> None:
+        super().__init__(coordinator, entry, "billing_history")
+
+    @property
+    def native_value(self) -> int:
+        """How many completed periods are on file."""
+        return len(self.coordinator.data.history)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Each period, newest first."""
+        return {
+            "periods": [
+                {
+                    "start": period.start.isoformat(),
+                    "end": period.end.isoformat(),
+                    "import_kwh": period.import_kwh,
+                    "export_kwh": period.export_kwh,
+                    "generation_kwh": period.generation_kwh,
+                    "used_kwh": period.used_kwh,
+                    "bill": period.bill,
+                }
+                for period in self.coordinator.data.history
+            ]
+        }

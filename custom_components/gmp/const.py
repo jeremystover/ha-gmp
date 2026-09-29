@@ -31,6 +31,8 @@ BILL_REFETCH_DAYS = 45
 RATES_LOOKBACK_DAYS = 120
 # How long to give the recorder before reading a rebuilt series back.
 REBUILD_RECHECK_SECONDS = 600
+# Completed billing periods kept for comparison.
+HISTORY_PERIODS = 12
 
 # Request windows, sized to what the portal itself asks for: hourly and
 # daily one billing period at a time, monthly a year at a time. GMP's limits
