@@ -582,3 +582,129 @@ class TestRatesFallBackPastUnpricedBills:
         later = dict(SOLAR_BILL, **{"Bill Date": "2026-10-26"})
         rates = api.parse_rates(LINE_ITEMS + [SOLAR_BILL, later])
         assert rates.bill_date == date(2026, 8, 25)
+
+
+# The rate schedules that appear together once a net-metered bill is in the
+# window. GMP emits a column per line PER SCHEDULE for every bill, with null
+# where the schedule does not apply — which is what broke the rate sensors.
+_NB = "(Residential non bypassable charges)"
+_GEN = "(Interconnected Generation)"
+_NM = "(Rate:  E01 Residential Net Metering)"
+
+MIXED_SCHEDULE_BILLS = [
+    {
+        "Bill Date": "2026-07-24",
+        "Bill Quantity": 1212.0,
+        "Bill Amount": 311.19,
+        f"KWH{_R}_qty": 1181.0,
+        f"KWH{_R}_amt": 253.41,
+        f"Customer Charge{_R}_qty": 31.0,
+        f"Customer Charge{_R}_amt": 19.41,
+        f"Energy Efficiency Charge{_R}_qty": 0.0,
+        f"Energy Efficiency Charge{_R}_amt": 12.68,
+        f"Current Energy/Major Storm Adjustor{_R}_qty": 0.0,
+        f"Current Energy/Major Storm Adjustor{_R}_amt": 22.23,
+        f"Extreme Storm Restoration Fund{_R}_qty": 0.0,
+        f"Extreme Storm Restoration Fund{_R}_amt": 1.96,
+        f"Electric Assistance Program Fee{_R}_qty": 0.0,
+        f"Electric Assistance Program Fee{_R}_amt": 1.5,
+        f"Customer Charge{_NB}_qty": None,
+        f"Customer Charge{_NB}_amt": None,
+        f"Solar Siting Adjustor{_GEN}_qty": None,
+        f"Solar Siting Adjustor{_GEN}_amt": None,
+        f"Excess Credit{_NM}_qty": None,
+        f"Excess Credit{_NM}_amt": None,
+    },
+    {
+        "Bill Date": "2026-08-25",
+        "Bill Quantity": 2024.0,
+        "Bill Amount": 510.03,
+        f"KWH{_R}_qty": 1992.0,
+        f"KWH{_R}_amt": 427.42,
+        f"Customer Charge{_R}_qty": 32.0,
+        f"Customer Charge{_R}_amt": 20.03,
+        f"Energy Efficiency Charge{_R}_qty": 0.0,
+        f"Energy Efficiency Charge{_R}_amt": 21.39,
+        f"Current Energy/Major Storm Adjustor{_R}_qty": 0.0,
+        f"Current Energy/Major Storm Adjustor{_R}_amt": 36.47,
+        f"Extreme Storm Restoration Fund{_R}_qty": 0.0,
+        f"Extreme Storm Restoration Fund{_R}_amt": 3.22,
+        f"Electric Assistance Program Fee{_R}_qty": 0.0,
+        f"Electric Assistance Program Fee{_R}_amt": 1.5,
+        # the solar-era schedules, null on this bill and listed LAST — the
+        # insertion order that used to decide the answer
+        f"Customer Charge{_NB}_qty": None,
+        f"Customer Charge{_NB}_amt": None,
+        f"Energy Efficiency Charge{_NB}_qty": None,
+        f"Energy Efficiency Charge{_NB}_amt": None,
+        f"Solar Siting Adjustor{_GEN}_qty": None,
+        f"Solar Siting Adjustor{_GEN}_amt": None,
+        f"Excess Credit{_NM}_qty": None,
+        f"Excess Credit{_NM}_amt": None,
+    },
+    {
+        "Bill Date": "2026-09-24",
+        "Bill Quantity": 2721.0,
+        "Bill Amount": -3.64,
+        f"KWH{_R}_qty": None,
+        f"KWH{_R}_amt": None,
+        f"Customer Charge{_NB}_qty": 31.0,
+        f"Customer Charge{_NB}_amt": 19.41,
+        f"Energy Efficiency Charge{_NB}_qty": 0.0,
+        f"Energy Efficiency Charge{_NB}_amt": 15.87,
+        f"Electric Assistance Program Fee{_NB}_qty": 0.0,
+        f"Electric Assistance Program Fee{_NB}_amt": 1.5,
+        f"Solar Siting Adjustor{_GEN}_qty": 2084.0,
+        f"Solar Siting Adjustor{_GEN}_amt": 83.36,
+        f"Excess Credit{_NM}_qty": 606.0,
+        f"Excess Credit{_NM}_amt": -125.5,
+        f"Customer Charge{_R}_qty": None,
+        f"Customer Charge{_R}_amt": None,
+    },
+]
+
+
+class TestTwoRateSchedulesOnOneResponse:
+    """A null from one schedule must never overwrite another schedule's value.
+
+    Once the 09/24/26 net-metered bill joined the lookback window, GMP began
+    emitting its schedules' columns on every older bill too, null where they do
+    not apply. Reading those blindly zeroed the customer charge and the energy
+    amount on every pre-solar bill, left nothing rateable, and the rate sensors
+    went unknown on the next restart and stayed there.
+    """
+
+    def test_a_null_does_not_wipe_a_quantity_from_another_schedule(self):
+        row = MIXED_SCHEDULE_BILLS[1]
+        assert api._line_quantity(row, api.CUSTOMER_CHARGE_LINE) == 32.0
+        assert api._line_quantity(row, api.ENERGY_LINE) == 1992.0
+
+    def test_a_null_does_not_wipe_an_amount_from_another_schedule(self):
+        amounts = api._line_amounts(MIXED_SCHEDULE_BILLS[1])
+        assert amounts[api.CUSTOMER_CHARGE_LINE] == pytest.approx(20.03)
+        assert amounts[api.ENERGY_LINE] == pytest.approx(427.42)
+        assert amounts["Energy Efficiency Charge"] == pytest.approx(21.39)
+
+    def test_the_solar_bill_still_reads_its_own_schedule(self):
+        row = MIXED_SCHEDULE_BILLS[2]
+        assert api._line_quantity(row, api.CUSTOMER_CHARGE_LINE) == 31.0
+        assert api._line_quantity(row, api.ENERGY_LINE) == 0.0
+        assert api._line_quantity(row, "Solar Siting Adjustor") == 2084.0
+        assert api._line_quantity(row, "Excess Credit") == 606.0
+
+    def test_rates_survive_the_first_net_metered_bill(self):
+        rates = api.parse_rates(MIXED_SCHEDULE_BILLS)
+        assert rates is not None, "the pre-solar bill should still price a kWh"
+        assert rates.bill_date == date(2026, 8, 25)
+        assert rates.customer == pytest.approx(20.03 / 32)
+        # the same figure the single-schedule fixture asserts: the collision fix
+        # must not merely avoid crashing, it must recover the real rate
+        assert rates.energy == pytest.approx(0.245231, abs=1e-6)
+        assert rates.fixed == pytest.approx(1.5)
+
+    def test_a_line_billed_under_two_schedules_is_summed_not_dropped(self):
+        row = dict(MIXED_SCHEDULE_BILLS[1])
+        row[f"Energy Efficiency Charge{_NB}_amt"] = 4.00
+        row[f"Energy Efficiency Charge{_NB}_qty"] = 10.0
+        assert api._line_amounts(row)["Energy Efficiency Charge"] == pytest.approx(25.39)
+        assert api._line_quantity(row, "Energy Efficiency Charge") == 10.0

@@ -526,27 +526,62 @@ class GmpClient:
         )
 
 
+def _line_base(key: str) -> str:
+    """A billed line's name, with its rate schedule stripped off the header."""
+    return key[:-4].split("(", 1)[0].strip()
+
+
 def _line_amounts(row: dict[str, Any]) -> dict[str, float]:
-    """Charge amounts by line name, dropping the rate schedule in the header."""
+    """Charge amounts by line name, dropping the rate schedule in the header.
+
+    The transposed report emits a column per billed line PER RATE SCHEDULE,
+    across every bill in the window, with null where a schedule does not apply
+    to that bill. Two columns therefore collapse onto one line name, so a null
+    must never be allowed to win:
+
+        "Customer Charge(Rate: E01 Residential)_amt"             19.41
+        "Customer Charge(Residential non bypassable charges)_amt" None
+
+    Assigning blindly turned that None into 0.0 and wiped the customer charge
+    and energy amount off every pre-solar bill the moment the first net-metered
+    bill entered the lookback window. No bill was left priceable, parse_rates
+    returned None, and the rate sensors went unknown and stayed there.
+
+    Blanks are skipped. Two real amounts on one bill are summed, because if GMP
+    ever does bill a line under two schedules in a single cycle, both are owed.
+    """
     amounts: dict[str, float] = {}
     for key, value in row.items():
-        if not key.endswith("_amt"):
+        if not key.endswith("_amt") or value is None or value == "":
             continue
         try:
-            amounts[key[:-4].split("(", 1)[0].strip()] = float(value or 0.0)
+            amount = float(value)
         except (TypeError, ValueError):
             continue
+        line = _line_base(key)
+        amounts[line] = amounts.get(line, 0.0) + amount
     return amounts
 
 
 def _line_quantity(row: dict[str, Any], line: str) -> float:
+    """The quantity billed on one line, across whatever schedules carry it.
+
+    Same collision as _line_amounts, and worse: returning the first match meant
+    a null-valued schedule column decided the answer purely by dict order. A
+    zero here fails the ``days <= 0`` guard in _rates_from and discards an
+    otherwise perfectly rateable bill.
+    """
+    total = 0.0
     for key, value in row.items():
-        if key.endswith("_qty") and key[:-4].split("(", 1)[0].strip() == line:
-            try:
-                return float(value or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-    return 0.0
+        if not key.endswith("_qty") or value is None or value == "":
+            continue
+        if _line_base(key) != line:
+            continue
+        try:
+            total += float(value)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def parse_rates(rows: Any) -> Rates | None:
